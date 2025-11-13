@@ -1,0 +1,114 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.manifest
+*.spec
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment Variables & Secrets
+.env
+.env.local
+.env.*.local
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Data Files (don't commit user data)
+data/
+*.csv
+*.json
+*.parquet
+*.db
+*.sqlite
+*.sqlite3
+output/
+
+# But keep ETL directory structure visible
+!data/etl/
+!data/etl/source/
+!data/etl/source/.gitkeep
+!data/etl/processed/
+!data/etl/processed/.gitkeep
+!data/etl/quarantine/
+!data/etl/quarantine/.gitkeep
+!data/etl/analytics/
+!data/etl/analytics/dashboards/
+!data/etl/analytics/dashboards/.gitkeep
+
+# State Files
+.state/
+*.state
+
+# Error/Dead Letter Queues
+.errors/
+*.dlq
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+*.ipynb
+
+# ML Models
+models/
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.joblib
+
+# OS
+Thumbs.db
+.Spotlight-V100
+.Trashes
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Terraform
+*.tfstate
+*.tfstate.backup
+.terraform/

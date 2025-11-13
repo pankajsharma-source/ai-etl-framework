@@ -1,0 +1,44 @@
+# Local Development Configuration
+
+# Execution Settings
+execution:
+  batch_size: 1000
+  max_workers: 4
+  timeout_seconds: 3600
+
+# Retry Policy
+retry_policy:
+  max_retries: 3
+  backoff_multiplier: 2
+  max_backoff_seconds: 60
+
+# Logging
+logging:
+  level: "INFO"
+  format: "text"  # 'text' or 'json'
+  file: null  # Set to path for file logging
+
+# Monitoring
+monitoring:
+  metrics_enabled: true
+  collect_stats: true
+
+# Storage
+storage:
+  data_path: "./data"
+  state_path: "./.state"
+  output_path: "./output"
+  error_path: "./.errors"
+
+# Default Adapter Settings
+defaults:
+  source:
+    batch_size: 1000
+    incremental: true
+
+  destination:
+    batch_size: 1000
+    create_schema: true
+
+  transform:
+    error_handling: "skip"  # 'skip', 'fail', 'log'
