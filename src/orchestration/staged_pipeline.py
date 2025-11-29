@@ -179,6 +179,11 @@ class StagedPipeline:
             input_count = len(records)
             self.logger.info(f"Loaded {input_count} records from storage")
 
+            # Call setup on transformers that need it
+            for transformer in transformers:
+                if hasattr(transformer, 'setup'):
+                    transformer.setup()
+
             # Apply transformers
             for transformer in transformers:
                 self.logger.info(f"Applying transformer: {transformer.__class__.__name__}")
@@ -238,14 +243,14 @@ class StagedPipeline:
                 error_message=str(e)
             )
 
-    def run_load_only(self, destination: DestinationAdapter) -> StageResult:
+    def run_load_only(self, destination: DestinationAdapter | List[DestinationAdapter]) -> StageResult:
         """
         Run Load stage only
 
-        Loads transformed data from storage and writes to destination
+        Loads transformed data from storage and writes to destination(s)
 
         Args:
-            destination: Destination adapter to write to
+            destination: Destination adapter(s) to write to (single or list)
 
         Returns:
             StageResult with load details
@@ -263,6 +268,10 @@ class StagedPipeline:
         start_time = time.time()
 
         try:
+            # Convert single destination to list for uniform processing
+            destinations = [destination] if not isinstance(destination, list) else destination
+            self.logger.info(f"Writing to {len(destinations)} destination(s)")
+
             # Load transformed records
             transform_key = f"{self.pipeline_id}/transformed"
             records, schema = self.storage.load_records(transform_key)
@@ -271,23 +280,35 @@ class StagedPipeline:
             record_count = len(records)
             self.logger.info(f"Loaded {record_count} records from storage")
 
-            # Write to destination
-            with destination as dest:
-                # Create schema at destination
-                if load_schema:
-                    dest.create_schema(load_schema)
-                    self.logger.info(f"Schema created: {len(load_schema.fields)} fields")
+            # Track total records written
+            total_written = 0
 
-                # Write records with transaction
-                dest.begin_transaction()
-                try:
-                    written = dest.write(iter(records))
-                    dest.commit()
-                    self.logger.info(f"Loaded {written} records")
+            # Write to each destination
+            for i, dest_adapter in enumerate(destinations):
+                dest_name = dest_adapter.__class__.__name__
+                self.logger.info(f"Loading to destination {i+1}/{len(destinations)}: {dest_name}")
 
-                except Exception as e:
-                    dest.rollback()
-                    raise
+                with dest_adapter as dest:
+                    # Create schema at destination
+                    if load_schema:
+                        dest.create_schema(load_schema)
+                        self.logger.info(f"Schema created: {len(load_schema.fields)} fields")
+
+                    # Write records with transaction
+                    dest.begin_transaction()
+                    try:
+                        written = dest.write(iter(records))
+                        dest.commit()
+
+                        if i == 0:
+                            total_written = written
+
+                        self.logger.info(f"Loaded {written} records to {dest_name}")
+
+                    except Exception as e:
+                        dest.rollback()
+                        self.logger.error(f"Failed to load to {dest_name}: {e}")
+                        raise
 
             self._load_complete = True
             duration = time.time() - start_time
@@ -299,7 +320,7 @@ class StagedPipeline:
             return StageResult(
                 stage='load',
                 success=True,
-                record_count=written,
+                record_count=total_written,
                 duration_seconds=duration
             )
 

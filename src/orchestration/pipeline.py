@@ -36,7 +36,7 @@ class Pipeline:
 
         self._source: Optional[SourceAdapter] = None
         self._transformers: List[Transformer] = []
-        self._destination: Optional[DestinationAdapter] = None
+        self._destinations: List[DestinationAdapter] = []
 
         self.result: Optional[PipelineResult] = None
 
@@ -70,7 +70,7 @@ class Pipeline:
 
     def load(self, destination: DestinationAdapter) -> 'Pipeline':
         """
-        Set the destination
+        Add a destination to the pipeline (supports multiple destinations)
 
         Args:
             destination: Destination adapter
@@ -78,8 +78,8 @@ class Pipeline:
         Returns:
             self for chaining
         """
-        self._destination = destination
-        self.logger.info(f"Destination set: {destination.__class__.__name__}")
+        self._destinations.append(destination)
+        self.logger.info(f"Destination added: {destination.__class__.__name__}")
         return self
 
     def run(self) -> 'Pipeline':
@@ -95,7 +95,7 @@ class Pipeline:
         if not self._source:
             raise PipelineException("No source adapter set. Call extract() first.")
 
-        if not self._destination:
+        if not self._destinations:
             raise PipelineException("No destination adapter set. Call load() first.")
 
         self.logger.info(f"Starting pipeline execution: {self.pipeline_id}")
@@ -128,6 +128,11 @@ class Pipeline:
             transform_start = time.time()
             self.logger.info(f"Stage 2: Transform - {len(self._transformers)} transformer(s)")
 
+            # Call setup on transformers that need it
+            for transformer in self._transformers:
+                if hasattr(transformer, 'setup'):
+                    transformer.setup()
+
             for transformer in self._transformers:
                 self.logger.info(f"Applying transformer: {transformer.__class__.__name__}")
                 records = transformer.transform_batch(records)
@@ -143,36 +148,48 @@ class Pipeline:
 
             # Stage 3: Load
             load_start = time.time()
-            self.logger.info("Stage 3: Load - Starting")
+            self.logger.info(f"Stage 3: Load - Writing to {len(self._destinations)} destination(s)")
 
-            with self._destination as destination:
-                # Use transformed schema if available (e.g., after aggregation)
-                # Otherwise use source schema
-                if records and records[0].schema:
-                    load_schema = records[0].schema
-                    self.logger.info(
-                        f"Using transformed schema: {len(load_schema.fields)} fields"
-                    )
-                else:
-                    load_schema = schema
-                    self.logger.info("Using source schema")
+            # Use transformed schema if available (e.g., after aggregation)
+            # Otherwise use source schema
+            if records and records[0].schema:
+                load_schema = records[0].schema
+                self.logger.info(
+                    f"Using transformed schema: {len(load_schema.fields)} fields"
+                )
+            else:
+                load_schema = schema
+                self.logger.info("Using source schema")
 
-                # Create schema at destination
-                destination.create_schema(load_schema)
+            # Track total records loaded (should be same for all destinations)
+            total_loaded = 0
 
-                # Write records
-                destination.begin_transaction()
-                try:
-                    written = destination.write(iter(records))
-                    destination.commit()
-                    result.records_loaded = written
+            # Write to each destination
+            for i, destination in enumerate(self._destinations):
+                dest_name = destination.__class__.__name__
+                self.logger.info(f"Loading to destination {i+1}/{len(self._destinations)}: {dest_name}")
 
-                    self.logger.info(f"Loaded {result.records_loaded} records")
+                with destination:
+                    # Create schema at destination
+                    destination.create_schema(load_schema)
 
-                except Exception as e:
-                    destination.rollback()
-                    raise
+                    # Write records
+                    destination.begin_transaction()
+                    try:
+                        written = destination.write(iter(records))
+                        destination.commit()
 
+                        if i == 0:
+                            total_loaded = written
+
+                        self.logger.info(f"Loaded {written} records to {dest_name}")
+
+                    except Exception as e:
+                        destination.rollback()
+                        self.logger.error(f"Failed to load to {dest_name}: {e}")
+                        raise
+
+            result.records_loaded = total_loaded
             result.load_duration = time.time() - load_start
 
             # Success!

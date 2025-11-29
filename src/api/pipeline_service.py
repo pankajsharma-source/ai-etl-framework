@@ -22,8 +22,20 @@ from src.storage.s3_storage import S3Storage
 from src.adapters.sources.csv_source import CSVSource
 from src.adapters.sources.json_source import JSONSource
 from src.transformers.cleaners.null_remover import NullRemover
+from src.transformers.cleaners.column_remover import ColumnRemover
 from src.transformers.enrichers.deduplicator import Deduplicator
+from src.transformers.enrichers.aggregator import Aggregator
+from src.transformers.enrichers.metadata_to_columns import MetadataToColumnsTransformer
+from src.transformers.validators.quality_scorer import QualityScorer
+from src.transformers.analyzers.anomaly_detector import AnomalyDetector
+from src.transformers.analyzers.schema_inferrer import SchemaInferrer
+from src.transformers.routing.anomaly_splitter import AnomalySplitter
+from src.transformers.exporters.dashboard_aggregator import DashboardAggregator
 from src.adapters.destinations.sqlite_loader import SQLiteLoader
+from src.adapters.destinations.postgres_loader import PostgreSQLLoader
+from src.adapters.destinations.csv_loader import CSVLoader
+from src.adapters.destinations.json_loader import JSONLoader
+from src.adapters.destinations.parquet_loader import ParquetLoader
 from src.common.logging import get_logger
 
 logger = get_logger("PipelineService")
@@ -55,6 +67,12 @@ class PipelineService:
         try:
             started_at = datetime.utcnow()
 
+            # Debug: Log post_processing config
+            print(f"DEBUG: Pipeline config received - post_processing: {config.post_processing}", flush=True)
+            if config.post_processing:
+                print(f"DEBUG:   enable_rag_indexing: {config.post_processing.enable_rag_indexing}", flush=True)
+                print(f"DEBUG:   index_name: {config.post_processing.index_name}", flush=True)
+
             # Create pipeline state
             self.pipelines[pipeline_id] = {
                 "id": pipeline_id,
@@ -73,15 +91,24 @@ class PipelineService:
                 self._build_transformer(t) for t in config.transformers
             ]
 
-            # Build destination
-            destination = self._build_destination(config.destination)
+            # Build destination(s) - support both single and multiple
+            destinations = []
+            if config.destinations:
+                # Multiple destinations
+                destinations = [self._build_destination(d) for d in config.destinations]
+            elif config.destination:
+                # Single destination (legacy)
+                destinations = [self._build_destination(config.destination)]
+            else:
+                raise ValueError("No destination specified")
 
             # Create and run pipeline
             pipeline = Pipeline(pipeline_id=pipeline_id)
             pipeline.extract(source)
             for transformer in transformers:
                 pipeline.transform(transformer)
-            pipeline.load(destination)
+            for destination in destinations:
+                pipeline.load(destination)
 
             # Execute (run in thread pool for async)
             await asyncio.get_event_loop().run_in_executor(
@@ -100,6 +127,9 @@ class PipelineService:
                 "status": "completed",
                 "updated_at": completed_at,
                 "records": result.records_loaded,
+                "extract_records": result.records_extracted,
+                "transform_records": result.records_transformed,
+                "load_records": result.records_loaded,
                 "duration": duration
             })
 
@@ -134,7 +164,24 @@ class PipelineService:
                 )
             ]
 
-            return PipelineResponse(
+            # Trigger RAG indexing if configured
+            rag_job_id = None
+            if config.post_processing and config.post_processing.enable_rag_indexing:
+                # Get output file paths from destination configs, not adapter objects
+                output_files = []
+                if config.destinations:
+                    output_files = [d.path for d in config.destinations if d.path]
+                elif config.destination and config.destination.path:
+                    output_files = [config.destination.path]
+
+                rag_job_id = await self.trigger_rag_indexing(
+                    pipeline_id=pipeline_id,
+                    output_files=output_files,
+                    config=config.post_processing
+                )
+
+            # Build response with optional RAG job ID
+            response = PipelineResponse(
                 pipeline_id=pipeline_id,
                 mode=ExecutionMode.UNIFIED,
                 status="completed",
@@ -142,6 +189,15 @@ class PipelineService:
                 stages=stages,
                 created_at=started_at
             )
+
+            # Add RAG job ID to metadata if indexing was triggered
+            if rag_job_id:
+                if not response.metadata:
+                    response.metadata = {}
+                response.metadata['rag_job_id'] = rag_job_id
+                response.metadata['rag_index_name'] = config.post_processing.index_name
+
+            return response
 
         except Exception as e:
             logger.error(f"Unified pipeline failed: {e}\n{traceback.format_exc()}")
@@ -154,6 +210,53 @@ class PipelineService:
             })
 
             raise
+
+    async def trigger_rag_indexing(
+        self,
+        pipeline_id: str,
+        output_files: List[str],
+        config
+    ) -> Optional[str]:
+        """
+        Trigger RAG indexing after successful pipeline execution
+
+        Args:
+            pipeline_id: Pipeline identifier
+            output_files: List of output file paths from pipeline
+            config: PostProcessingConfig with RAG settings
+
+        Returns:
+            job_id from RAG API, or None if failed
+        """
+        try:
+            import httpx
+
+            logger.info(f"Triggering RAG indexing for pipeline {pipeline_id}")
+            logger.info(f"RAG API URL: {config.rag_api_url}")
+            logger.info(f"Index name: {config.index_name}")
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{config.rag_api_url}/index/hybrid/local",
+                    json={
+                        "path": "/app/data/input/sales",  # Index only sales data, not entire directory
+                        "target_index": config.index_name,
+                        "batch_size": config.batch_size
+                    }
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    job_id = result.get('job_id')
+                    logger.info(f"RAG indexing triggered successfully: job_id={job_id}")
+                    return job_id
+                else:
+                    logger.error(f"RAG indexing failed: {response.status_code} - {response.text}")
+                    return None
+
+        except Exception as e:
+            logger.error(f"Failed to trigger RAG indexing: {e}")
+            return None  # Don't fail pipeline if indexing fails
 
     async def init_staged(
         self,
@@ -295,8 +398,16 @@ class PipelineService:
             staged = self._get_staged_pipeline(pipeline_id)
             config = PipelineConfig(**self.pipelines[pipeline_id]["config"])
 
-            # Build destination
-            destination = self._build_destination(config.destination)
+            # Build destination(s) - support both single and multiple
+            destinations = []
+            if config.destinations:
+                destinations = [self._build_destination(d) for d in config.destinations]
+            elif config.destination:
+                destinations = [self._build_destination(config.destination)]
+            else:
+                raise ValueError("No destination specified")
+
+            destination = destinations  # Pass as list to staged pipeline
 
             # Update status
             self.pipelines[pipeline_id]["load_status"] = StageStatus.RUNNING
@@ -430,11 +541,56 @@ class PipelineService:
 
     def _build_transformer(self, config):
         """Build transformer from config"""
+        # Get config dict if provided
+        cfg = config.config or {}
+
         if config.type == "null_remover":
-            return NullRemover()
+            return NullRemover(
+                strategy=cfg.get('strategy', 'drop')
+            )
         elif config.type == "dedup":
-            return Deduplicator()
-        # Add other transformer types as needed
+            return Deduplicator(
+                match_mode=cfg.get('match_mode', 'exact')
+            )
+        elif config.type == "quality_scorer":
+            return QualityScorer(
+                min_score=cfg.get('min_score', 0.7),
+                filter_low_quality=cfg.get('filter_low_quality', False),
+                mark_anomalies=cfg.get('mark_anomalies', False)
+            )
+        elif config.type == "anomaly_detector":
+            return AnomalyDetector(
+                method=cfg.get('method', 'statistical'),
+                threshold=cfg.get('threshold', 3.0)
+            )
+        elif config.type == "schema_inferrer":
+            return SchemaInferrer()
+        elif config.type == "aggregator":
+            return Aggregator(
+                group_by=cfg.get('group_by', []),
+                aggregations=cfg.get('aggregations', {})
+            )
+        elif config.type == "column_remover":
+            return ColumnRemover(
+                columns=cfg.get('columns', [])
+            )
+        elif config.type == "metadata_to_columns":
+            return MetadataToColumnsTransformer()
+        elif config.type == "anomaly_splitter":
+            return AnomalySplitter(
+                output_path=cfg.get('output_path', '/app/quarantine/anomalies.csv'),
+                write_on_completion=cfg.get('write_on_completion', True)
+            )
+        elif config.type == "dashboard_aggregator":
+            return DashboardAggregator(
+                output_dir=cfg.get('output_dir', './output/dashboards')
+            )
+        elif config.type == "type_converter":
+            # Custom type converter - would need implementation
+            raise ValueError("type_converter not yet implemented")
+        elif config.type == "custom":
+            # Custom transformer - would need implementation
+            raise ValueError("custom transformers not yet implemented")
         else:
             raise ValueError(f"Unsupported transformer type: {config.type}")
 
@@ -442,10 +598,38 @@ class PipelineService:
         """Build destination adapter from config"""
         if config.type == "sqlite":
             return SQLiteLoader(
-                db_path=config.path,
+                db_path=config.path or "./output.db",
                 table=config.table_name
             )
-        # Add other destination types as needed
+        elif config.type == "postgres":
+            # Parse connection string or use individual params
+            if config.connection_string:
+                # TODO: Parse connection string into host, database, user, password
+                raise ValueError("PostgreSQL connection_string parsing not yet implemented. Please use individual host/database/user/password in config.")
+            else:
+                return PostgreSQLLoader(
+                    host=config.host or "localhost",
+                    database=config.database or "etl_db",
+                    user=config.user or "postgres",
+                    password=config.password or "",
+                    table=config.table_name,
+                    port=config.port or 5432
+                )
+        elif config.type == "csv":
+            return CSVLoader(
+                file_path=config.path or "./output.csv",
+                mode="overwrite"
+            )
+        elif config.type == "json":
+            return JSONLoader(
+                file_path=config.path or "./output.json",
+                mode="array"  # or "lines" for JSONL
+            )
+        elif config.type == "parquet":
+            return ParquetLoader(
+                file_path=config.path or "./output.parquet",
+                compression="snappy"
+            )
         else:
             raise ValueError(f"Unsupported destination type: {config.type}")
 

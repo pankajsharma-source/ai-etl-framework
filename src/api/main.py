@@ -17,6 +17,15 @@ from src.api.models import (
 )
 from src.api.pipeline_service import PipelineService
 from src.common.logging import get_logger
+from src.database import (
+    init_database,
+    get_data_sources,
+    save_data_source,
+    delete_data_source,
+    get_pipeline_history,
+    save_pipeline_run,
+    migrate_from_localstorage
+)
 
 logger = get_logger("API")
 
@@ -37,6 +46,17 @@ app.add_middleware(
 
 # Pipeline service (manages executions)
 pipeline_service = PipelineService()
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database on startup"""
+    try:
+        init_database()
+        logger.info("Analytics database initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize analytics database: {e}")
+        # Don't fail startup - allow pipeline operations to continue
 
 
 @app.get("/")
@@ -267,6 +287,205 @@ async def preview_data(
         raise
     except Exception as e:
         logger.error(f"Data preview failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# Analytics Interface Storage Endpoints
+# ============================================================
+
+@app.get("/api/analytics/data-sources")
+async def get_analytics_data_sources(role: str):
+    """
+    Get all data sources for a specific role
+
+    Args:
+        role: User role (ceo, cto, analyst, etc.)
+    """
+    try:
+        sources = get_data_sources(role)
+        return {
+            "role": role,
+            "sources": sources,
+            "count": len(sources)
+        }
+    except Exception as e:
+        logger.error(f"Failed to get data sources: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/analytics/data-sources")
+async def save_analytics_data_source(data: Dict[str, Any]):
+    """
+    Save or update a data source configuration
+
+    Body should contain:
+        - role: User role
+        - source: Data source object
+    """
+    try:
+        role = data.get('role')
+        source = data.get('source')
+
+        if not role or not source:
+            raise HTTPException(
+                status_code=400,
+                detail="Both 'role' and 'source' are required"
+            )
+
+        save_data_source(role, source)
+
+        return {
+            "message": "Data source saved successfully",
+            "source_id": source.get('id'),
+            "role": role
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to save data source: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/analytics/data-sources/{source_id}")
+async def delete_analytics_data_source(source_id: str, role: str):
+    """
+    Delete a data source
+
+    Args:
+        source_id: Data source ID
+        role: User role (query parameter)
+    """
+    try:
+        success = delete_data_source(role, source_id)
+
+        if not success:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Data source '{source_id}' not found for role '{role}'"
+            )
+
+        return {
+            "message": "Data source deleted successfully",
+            "source_id": source_id,
+            "role": role
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete data source: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/analytics/history")
+async def get_analytics_history(role: str, limit: int = 50):
+    """
+    Get pipeline execution history for a specific role
+
+    Args:
+        role: User role
+        limit: Maximum number of records to return (default: 50)
+    """
+    try:
+        history = get_pipeline_history(role, limit)
+        return {
+            "role": role,
+            "history": history,
+            "count": len(history)
+        }
+    except Exception as e:
+        logger.error(f"Failed to get pipeline history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/analytics/history")
+async def save_analytics_history(data: Dict[str, Any]):
+    """
+    Save a pipeline run to history
+
+    Body should contain:
+        - role: User role
+        - run: Pipeline run data
+    """
+    try:
+        role = data.get('role')
+        run = data.get('run')
+
+        if not role or not run:
+            raise HTTPException(
+                status_code=400,
+                detail="Both 'role' and 'run' are required"
+            )
+
+        run_id = save_pipeline_run(role, run)
+
+        return {
+            "message": "Pipeline run saved successfully",
+            "run_id": run_id,
+            "role": role
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to save pipeline run: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/analytics/migrate")
+async def migrate_analytics_data(data: Dict[str, Any]):
+    """
+    Migrate data from localStorage to PostgreSQL
+
+    Body should contain:
+        - role: User role
+        - dataSources: Array of data source objects
+        - history: Array of pipeline run objects
+    """
+    try:
+        role = data.get('role')
+        data_sources = data.get('dataSources', [])
+        history = data.get('history', [])
+
+        if not role:
+            raise HTTPException(
+                status_code=400,
+                detail="'role' is required"
+            )
+
+        result = migrate_from_localstorage(role, data_sources, history)
+
+        return {
+            "message": "Migration completed",
+            "role": role,
+            "result": result
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Migration failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/analytics/history")
+async def clear_analytics_history(role: str):
+    """
+    Clear all pipeline history for a specific role
+
+    Args:
+        role: User role (query parameter)
+    """
+    try:
+        from src.database.analytics_db import clear_pipeline_history
+
+        deleted_count = clear_pipeline_history(role)
+
+        return {
+            "message": "Pipeline history cleared successfully",
+            "role": role,
+            "deleted_count": deleted_count
+        }
+    except Exception as e:
+        logger.error(f"Failed to clear pipeline history: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
