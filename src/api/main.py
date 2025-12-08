@@ -377,6 +377,39 @@ async def delete_analytics_data_source(source_id: str, role: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.patch("/api/analytics/data-sources/{source_id}/last-run")
+async def update_source_last_run(source_id: str, role: str, last_run: Dict[str, Any]):
+    """
+    Update a data source's lastRun field (preserves card metadata when history is cleared)
+
+    Args:
+        source_id: Data source ID
+        role: User role (query parameter)
+        last_run: Last run data (timestamp, type, records, duration)
+    """
+    try:
+        from src.database.analytics_db import update_source_last_run as db_update_last_run
+
+        success = db_update_last_run(role, source_id, last_run)
+
+        if not success:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Data source '{source_id}' not found for role '{role}'"
+            )
+
+        return {
+            "message": "Last run updated successfully",
+            "source_id": source_id,
+            "role": role
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update source last run: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/analytics/history")
 async def get_analytics_history(role: str, limit: int = 50):
     """
@@ -486,6 +519,323 @@ async def clear_analytics_history(role: str):
         }
     except Exception as e:
         logger.error(f"Failed to clear pipeline history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# INSIGHT GENERATION ENDPOINTS
+# ============================================================================
+
+@app.get("/api/analytics/insights")
+async def get_analytics_insights(role: str):
+    """
+    Get all AI-generated insights for a specific role
+
+    Args:
+        role: User role (query parameter)
+    """
+    try:
+        from src.database.analytics_db import get_source_insights
+
+        insights = get_source_insights(role)
+
+        return {
+            "role": role,
+            "insights": insights,
+            "count": len(insights)
+        }
+    except Exception as e:
+        logger.error(f"Failed to get insights: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/analytics/generate-insights")
+async def generate_analytics_insights(data: Dict[str, Any], background_tasks: BackgroundTasks):
+    """
+    Trigger AI insight generation for a data source.
+
+    ETL insights take precedence over RAG insights:
+    - If ETL insights exist, never overwrite
+    - If RAG insights exist and this is an ETL run, regenerate
+    - If RAG insights exist and this is a RAG run, skip
+
+    Body should contain:
+        - source_id: Data source ID
+        - role: User role
+        - file_path: Path to the processed data file
+        - source_name: Data source name
+        - source_icon: Data source icon emoji
+        - run_type: 'etl', 'rag', or 'etl+rag'
+    """
+    try:
+        from src.database.analytics_db import get_source_insight, save_source_insights
+
+        source_id = data.get('source_id')
+        role = data.get('role')
+        file_path = data.get('file_path')
+        source_name = data.get('source_name')
+        source_icon = data.get('source_icon', '📊')
+        run_type = data.get('run_type', 'etl')
+
+        if not all([source_id, role, file_path, source_name]):
+            raise HTTPException(
+                status_code=400,
+                detail="source_id, role, file_path, and source_name are required"
+            )
+
+        # Check if insights already exist
+        existing = get_source_insight(role, source_id)
+        is_etl_run = run_type in ['etl', 'etl+rag']
+
+        if existing:
+            existing_from_etl = existing.get('generatedFrom') == 'etl'
+
+            if existing_from_etl:
+                # ETL insights exist - never overwrite
+                return {
+                    "status": "skipped",
+                    "reason": "ETL insights already exist",
+                    "source_id": source_id
+                }
+
+            if not is_etl_run:
+                # RAG insights exist, and this is another RAG run - skip
+                return {
+                    "status": "skipped",
+                    "reason": "Insights already exist",
+                    "source_id": source_id
+                }
+
+            # RAG insights exist, but this is an ETL run - will regenerate
+            logger.info(f"Regenerating insights for {source_id}: ETL takes precedence over RAG")
+
+        # Generate insights in background to not block the response
+        background_tasks.add_task(
+            _generate_and_save_insights,
+            source_id, role, file_path, source_name, source_icon, is_etl_run
+        )
+
+        return {
+            "status": "generating",
+            "message": "Insight generation started",
+            "source_id": source_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to trigger insight generation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _generate_and_save_insights(
+    source_id: str,
+    role: str,
+    file_path: str,
+    source_name: str,
+    source_icon: str,
+    is_etl_run: bool
+):
+    """Background task to generate and save insights."""
+    try:
+        from src.api.insight_generator import get_insight_generator
+        from src.database.analytics_db import save_source_insights
+
+        generator = get_insight_generator()
+        result = generator.generate_insights(file_path, source_name)
+
+        # Save to database
+        save_source_insights(
+            role=role,
+            source_id=source_id,
+            source_name=source_name,
+            source_icon=source_icon,
+            data_summary=result['summary'],
+            insights=result['insights'],
+            records_analyzed=result['records_analyzed'],
+            generated_from='etl' if is_etl_run else 'rag'
+        )
+
+        logger.info(f"Insights saved for {source_id} (role: {role})")
+
+    except Exception as e:
+        logger.error(f"Background insight generation failed for {source_id}: {e}")
+
+
+# ============================================================================
+# VISUALIZATION ENDPOINTS
+# ============================================================================
+
+@app.get("/api/analytics/visualizations")
+async def get_analytics_visualizations(role: str, source_id: str = None):
+    """
+    Get visualizations for a specific data source or all sources for a role.
+
+    Args:
+        role: User role (required)
+        source_id: Data source ID (optional - if not provided, returns all for role)
+    """
+    try:
+        from src.database.analytics_db import get_visualizations, get_all_visualizations_for_role
+
+        if source_id:
+            visualizations = get_visualizations(role, source_id)
+        else:
+            visualizations = get_all_visualizations_for_role(role)
+
+        return {
+            "role": role,
+            "source_id": source_id,
+            "visualizations": visualizations,
+            "count": len(visualizations)
+        }
+    except Exception as e:
+        logger.error(f"Failed to get visualizations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/analytics/visualizations/generate")
+async def generate_analytics_visualizations(data: Dict[str, Any], background_tasks: BackgroundTasks):
+    """
+    Generate visualizations for a data source.
+    Called after ETL processing completes.
+
+    Body should contain:
+        - source_id: Data source ID
+        - role: User role
+        - file_path: Path to the processed data file (Parquet or CSV)
+    """
+    try:
+        source_id = data.get('source_id')
+        role = data.get('role')
+        file_path = data.get('file_path')
+
+        if not all([source_id, role, file_path]):
+            raise HTTPException(
+                status_code=400,
+                detail="source_id, role, and file_path are required"
+            )
+
+        # Generate visualizations in background to not block the response
+        background_tasks.add_task(
+            _generate_and_save_visualizations,
+            source_id, role, file_path
+        )
+
+        return {
+            "status": "generating",
+            "message": "Visualization generation started",
+            "source_id": source_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to trigger visualization generation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _generate_and_save_visualizations(source_id: str, role: str, file_path: str):
+    """Background task to generate and save visualizations."""
+    try:
+        from src.api.visualization_generator import generate_all_charts
+        from src.database.analytics_db import save_visualizations
+
+        logger.info(f"Generating visualizations for {source_id} from {file_path}")
+
+        # Generate charts
+        charts = generate_all_charts(file_path, max_charts=10)
+
+        if charts:
+            # Save to database
+            saved_count = save_visualizations(role, source_id, charts)
+            logger.info(f"Saved {saved_count} visualizations for {source_id}")
+        else:
+            logger.warning(f"No visualizations generated for {source_id}")
+
+    except Exception as e:
+        logger.error(f"Background visualization generation failed for {source_id}: {e}")
+
+
+@app.post("/api/analytics/visualizations/custom")
+async def generate_custom_visualization(data: Dict[str, Any]):
+    """
+    Generate a custom visualization based on user prompt.
+    Used by AI chat to create on-demand charts.
+
+    Body should contain:
+        - source_id: Data source ID
+        - role: User role
+        - prompt: Natural language description of desired chart
+    """
+    try:
+        from src.api.visualization_generator import generate_custom_chart
+        from src.database.analytics_db import get_data_sources
+
+        source_id = data.get('source_id')
+        role = data.get('role')
+        prompt = data.get('prompt')
+
+        if not all([source_id, role, prompt]):
+            raise HTTPException(
+                status_code=400,
+                detail="source_id, role, and prompt are required"
+            )
+
+        # Get the file path for this source
+        sources = get_data_sources(role)
+        source = next((s for s in sources if s.get('id') == source_id), None)
+
+        if not source:
+            raise HTTPException(status_code=404, detail=f"Source {source_id} not found")
+
+        # Get the ETL output path
+        file_path = source.get('etlPath') or source.get('filePath')
+        if not file_path:
+            raise HTTPException(status_code=400, detail="No processed data file available for this source")
+
+        # Generate custom chart
+        chart = generate_custom_chart(file_path, prompt)
+
+        if not chart:
+            return {
+                "status": "error",
+                "message": "Could not generate chart from the given prompt",
+                "source_id": source_id
+            }
+
+        return {
+            "status": "success",
+            "chart": chart,
+            "source_id": source_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to generate custom visualization: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/analytics/visualizations")
+async def delete_analytics_visualizations(role: str, source_id: str):
+    """
+    Delete all visualizations for a specific data source.
+
+    Args:
+        role: User role (query parameter)
+        source_id: Data source ID (query parameter)
+    """
+    try:
+        from src.database.analytics_db import delete_visualizations
+
+        deleted_count = delete_visualizations(role, source_id)
+
+        return {
+            "message": "Visualizations deleted successfully",
+            "role": role,
+            "source_id": source_id,
+            "deleted_count": deleted_count
+        }
+    except Exception as e:
+        logger.error(f"Failed to delete visualizations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

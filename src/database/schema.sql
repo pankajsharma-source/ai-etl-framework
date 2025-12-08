@@ -43,6 +43,45 @@ CREATE INDEX IF NOT EXISTS idx_history_role_time ON analytics_pipeline_history(r
 CREATE INDEX IF NOT EXISTS idx_history_source ON analytics_pipeline_history(source_id);
 
 -- ============================================================================
+-- AI-Generated Source Insights Table
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS analytics_source_insights (
+    id SERIAL PRIMARY KEY,
+    source_id VARCHAR(50) NOT NULL,
+    role VARCHAR(50) NOT NULL,
+    source_name VARCHAR(255),
+    source_icon VARCHAR(10),
+    data_summary TEXT,
+    insights JSONB,  -- Array of insight strings
+    records_analyzed INTEGER DEFAULT 0,
+    generated_from VARCHAR(10),  -- 'etl' or 'rag' - ETL takes precedence
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source_id, role)
+);
+
+-- Index for fast role-based queries
+CREATE INDEX IF NOT EXISTS idx_insights_role ON analytics_source_insights(role);
+
+-- ============================================================================
+-- Auto-Generated Visualizations Table
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS analytics_visualizations (
+    id SERIAL PRIMARY KEY,
+    source_id VARCHAR(50) NOT NULL,
+    role VARCHAR(50) NOT NULL,
+    chart_type VARCHAR(50) NOT NULL,      -- 'bar', 'line', 'pie', 'scatter', 'histogram', 'box', 'heatmap'
+    chart_title VARCHAR(255),
+    x_column VARCHAR(100),
+    y_column VARCHAR(100),
+    chart_config JSONB NOT NULL,          -- Full Plotly JSON configuration
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source_id, role, chart_type, x_column, y_column)
+);
+
+-- Index for fast source/role queries
+CREATE INDEX IF NOT EXISTS idx_viz_source_role ON analytics_visualizations(source_id, role);
+
+-- ============================================================================
 -- Update trigger for updated_at
 -- ============================================================================
 CREATE OR REPLACE FUNCTION update_updated_at_column()

@@ -193,6 +193,41 @@ def delete_data_source(role: str, source_id: str) -> bool:
         raise
 
 
+def update_source_last_run(role: str, source_id: str, last_run: Dict[str, Any]) -> bool:
+    """
+    Update a data source's lastRun field in its config.
+    This persists card metadata separately from pipeline history.
+
+    Args:
+        role: User role
+        source_id: Data source ID
+        last_run: Last run data (timestamp, type, records, duration)
+
+    Returns:
+        True if successful, False if source not found
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                # Update the config JSONB to include/update lastRun
+                cursor.execute("""
+                    UPDATE analytics_data_sources
+                    SET config = config || %s::jsonb,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND role = %s
+                """, (Json({'lastRun': last_run}), source_id, role))
+
+                if cursor.rowcount == 0:
+                    logger.warning(f"Data source {source_id} not found for role {role}")
+                    return False
+
+        logger.info(f"Updated lastRun for data source {source_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to update source lastRun: {e}")
+        raise
+
+
 # ============================================================================
 # Pipeline History Operations
 # ============================================================================
@@ -319,6 +354,360 @@ def clear_pipeline_history(role: str) -> int:
         return deleted_count
     except Exception as e:
         logger.error(f"Failed to clear pipeline history: {e}")
+        raise
+
+
+# ============================================================================
+# Source Insights Operations
+# ============================================================================
+
+def get_source_insights(role: str) -> List[Dict[str, Any]]:
+    """
+    Get all AI-generated insights for a specific role.
+
+    Args:
+        role: User role
+
+    Returns:
+        List of insight dictionaries
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT id, source_id, role, source_name, source_icon,
+                           data_summary, insights, records_analyzed,
+                           generated_from, generated_at
+                    FROM analytics_source_insights
+                    WHERE role = %s
+                    ORDER BY generated_at DESC
+                """, (role,))
+
+                rows = cursor.fetchall()
+
+                # Convert to frontend format
+                insights = []
+                for row in rows:
+                    insights.append({
+                        'id': row['id'],
+                        'sourceId': row['source_id'],
+                        'sourceName': row['source_name'],
+                        'sourceIcon': row['source_icon'],
+                        'dataSummary': row['data_summary'],
+                        'insights': row['insights'] or [],
+                        'recordsAnalyzed': row['records_analyzed'],
+                        'generatedFrom': row['generated_from'],
+                        'generatedAt': row['generated_at'].isoformat() if row['generated_at'] else None
+                    })
+
+                return insights
+    except Exception as e:
+        logger.error(f"Failed to get source insights for role {role}: {e}")
+        raise
+
+
+def get_source_insight(role: str, source_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Get AI-generated insight for a specific source.
+
+    Args:
+        role: User role
+        source_id: Data source ID
+
+    Returns:
+        Insight dictionary or None if not found
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT id, source_id, role, source_name, source_icon,
+                           data_summary, insights, records_analyzed,
+                           generated_from, generated_at
+                    FROM analytics_source_insights
+                    WHERE role = %s AND source_id = %s
+                """, (role, source_id))
+
+                row = cursor.fetchone()
+
+                if not row:
+                    return None
+
+                return {
+                    'id': row['id'],
+                    'sourceId': row['source_id'],
+                    'sourceName': row['source_name'],
+                    'sourceIcon': row['source_icon'],
+                    'dataSummary': row['data_summary'],
+                    'insights': row['insights'] or [],
+                    'recordsAnalyzed': row['records_analyzed'],
+                    'generatedFrom': row['generated_from'],
+                    'generatedAt': row['generated_at'].isoformat() if row['generated_at'] else None
+                }
+    except Exception as e:
+        logger.error(f"Failed to get source insight for {source_id}: {e}")
+        raise
+
+
+def save_source_insights(
+    role: str,
+    source_id: str,
+    source_name: str,
+    source_icon: str,
+    data_summary: str,
+    insights: List[str],
+    records_analyzed: int,
+    generated_from: str
+) -> int:
+    """
+    Save or update AI-generated insights for a data source.
+
+    Args:
+        role: User role
+        source_id: Data source ID
+        source_name: Data source name
+        source_icon: Data source icon emoji
+        data_summary: 2-3 sentence summary of the data
+        insights: List of insight strings (3-5 items)
+        records_analyzed: Number of records analyzed
+        generated_from: 'etl' or 'rag'
+
+    Returns:
+        ID of the created/updated record
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO analytics_source_insights
+                        (source_id, role, source_name, source_icon, data_summary,
+                         insights, records_analyzed, generated_from, generated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (source_id, role)
+                    DO UPDATE SET
+                        source_name = EXCLUDED.source_name,
+                        source_icon = EXCLUDED.source_icon,
+                        data_summary = EXCLUDED.data_summary,
+                        insights = EXCLUDED.insights,
+                        records_analyzed = EXCLUDED.records_analyzed,
+                        generated_from = EXCLUDED.generated_from,
+                        generated_at = CURRENT_TIMESTAMP
+                    RETURNING id
+                """, (source_id, role, source_name, source_icon, data_summary,
+                      Json(insights), records_analyzed, generated_from))
+
+                insight_id = cursor.fetchone()[0]
+
+        logger.info(f"Saved insights for source {source_id} (role: {role}, from: {generated_from})")
+        return insight_id
+    except Exception as e:
+        logger.error(f"Failed to save source insights: {e}")
+        raise
+
+
+def delete_source_insights(role: str, source_id: str) -> bool:
+    """
+    Delete insights for a specific source.
+
+    Args:
+        role: User role
+        source_id: Data source ID
+
+    Returns:
+        True if deleted, False if not found
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    DELETE FROM analytics_source_insights
+                    WHERE role = %s AND source_id = %s
+                """, (role, source_id))
+
+                if cursor.rowcount == 0:
+                    return False
+
+        logger.info(f"Deleted insights for source {source_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to delete source insights: {e}")
+        raise
+
+
+# ============================================================================
+# Visualization Operations
+# ============================================================================
+
+def get_visualizations(role: str, source_id: str) -> List[Dict[str, Any]]:
+    """
+    Get all generated visualizations for a specific data source.
+
+    Args:
+        role: User role
+        source_id: Data source ID
+
+    Returns:
+        List of visualization dictionaries
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT id, source_id, role, chart_type, chart_title,
+                           x_column, y_column, chart_config, generated_at
+                    FROM analytics_visualizations
+                    WHERE role = %s AND source_id = %s
+                    ORDER BY id ASC
+                """, (role, source_id))
+
+                rows = cursor.fetchall()
+
+                # Convert to frontend format
+                visualizations = []
+                for row in rows:
+                    visualizations.append({
+                        'id': row['id'],
+                        'sourceId': row['source_id'],
+                        'chartType': row['chart_type'],
+                        'chartTitle': row['chart_title'],
+                        'xColumn': row['x_column'],
+                        'yColumn': row['y_column'],
+                        'chartConfig': row['chart_config'],
+                        'generatedAt': row['generated_at'].isoformat() if row['generated_at'] else None
+                    })
+
+                return visualizations
+    except Exception as e:
+        logger.error(f"Failed to get visualizations for source {source_id}: {e}")
+        raise
+
+
+def get_all_visualizations_for_role(role: str) -> List[Dict[str, Any]]:
+    """
+    Get all visualizations for a role, grouped by source.
+
+    Args:
+        role: User role
+
+    Returns:
+        List of visualization dictionaries with source info
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT v.id, v.source_id, v.chart_type, v.chart_title,
+                           v.x_column, v.y_column, v.chart_config, v.generated_at,
+                           s.name as source_name, s.icon as source_icon
+                    FROM analytics_visualizations v
+                    LEFT JOIN analytics_data_sources s ON v.source_id = s.id AND v.role = s.role
+                    WHERE v.role = %s
+                    ORDER BY v.source_id, v.id
+                """, (role,))
+
+                rows = cursor.fetchall()
+
+                visualizations = []
+                for row in rows:
+                    visualizations.append({
+                        'id': row['id'],
+                        'sourceId': row['source_id'],
+                        'sourceName': row['source_name'],
+                        'sourceIcon': row['source_icon'],
+                        'chartType': row['chart_type'],
+                        'chartTitle': row['chart_title'],
+                        'xColumn': row['x_column'],
+                        'yColumn': row['y_column'],
+                        'chartConfig': row['chart_config'],
+                        'generatedAt': row['generated_at'].isoformat() if row['generated_at'] else None
+                    })
+
+                return visualizations
+    except Exception as e:
+        logger.error(f"Failed to get all visualizations for role {role}: {e}")
+        raise
+
+
+def save_visualizations(role: str, source_id: str, charts: List[Dict[str, Any]]) -> int:
+    """
+    Save multiple visualizations for a data source.
+    Replaces any existing visualizations for this source.
+
+    Args:
+        role: User role
+        source_id: Data source ID
+        charts: List of chart configurations from visualization_generator
+
+    Returns:
+        Number of charts saved
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                # First, delete existing visualizations for this source
+                cursor.execute("""
+                    DELETE FROM analytics_visualizations
+                    WHERE role = %s AND source_id = %s
+                """, (role, source_id))
+
+                deleted_count = cursor.rowcount
+                if deleted_count > 0:
+                    logger.info(f"Deleted {deleted_count} existing visualizations for source {source_id}")
+
+                # Insert new visualizations
+                saved_count = 0
+                for chart in charts:
+                    try:
+                        cursor.execute("""
+                            INSERT INTO analytics_visualizations
+                                (source_id, role, chart_type, chart_title, x_column, y_column, chart_config)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """, (
+                            source_id,
+                            role,
+                            chart.get('chart_type'),
+                            chart.get('title'),
+                            chart.get('x_column'),
+                            chart.get('y_column'),
+                            Json(chart.get('chart_config'))
+                        ))
+                        saved_count += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to save chart '{chart.get('title')}': {e}")
+                        continue
+
+        logger.info(f"Saved {saved_count} visualizations for source {source_id} (role: {role})")
+        return saved_count
+    except Exception as e:
+        logger.error(f"Failed to save visualizations: {e}")
+        raise
+
+
+def delete_visualizations(role: str, source_id: str) -> int:
+    """
+    Delete all visualizations for a specific source.
+
+    Args:
+        role: User role
+        source_id: Data source ID
+
+    Returns:
+        Number of visualizations deleted
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    DELETE FROM analytics_visualizations
+                    WHERE role = %s AND source_id = %s
+                """, (role, source_id))
+
+                deleted_count = cursor.rowcount
+
+        logger.info(f"Deleted {deleted_count} visualizations for source {source_id}")
+        return deleted_count
+    except Exception as e:
+        logger.error(f"Failed to delete visualizations: {e}")
         raise
 
 
