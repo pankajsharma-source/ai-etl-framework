@@ -711,6 +711,68 @@ def delete_visualizations(role: str, source_id: str) -> int:
         raise
 
 
+def get_sources_with_visualizations(role: str) -> List[str]:
+    """
+    Get list of source IDs that have visualizations stored.
+
+    Args:
+        role: User role
+
+    Returns:
+        List of source_id strings that have at least one visualization
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT DISTINCT source_id
+                    FROM analytics_visualizations
+                    WHERE role = %s
+                    ORDER BY source_id
+                """, (role,))
+
+                rows = cursor.fetchall()
+                return [row[0] for row in rows]
+    except Exception as e:
+        logger.error(f"Failed to get sources with visualizations: {e}")
+        return []
+
+
+def cleanup_source_data(role: str, source_id: str) -> Dict[str, int]:
+    """
+    Delete all insights and visualizations for a data source.
+    Does NOT delete the data source configuration itself.
+
+    Args:
+        role: User role
+        source_id: Data source ID
+
+    Returns:
+        Dict with counts: {'insights_deleted': int, 'visualizations_deleted': int}
+    """
+    insights_deleted = 0
+    viz_deleted = 0
+
+    try:
+        # Delete insights
+        insights_deleted = delete_source_insights(role, source_id)
+        logger.info(f"Cleanup: deleted {insights_deleted} insights for source {source_id}")
+    except Exception as e:
+        logger.error(f"Cleanup: failed to delete insights for source {source_id}: {e}")
+
+    try:
+        # Delete visualizations
+        viz_deleted = delete_visualizations(role, source_id)
+        logger.info(f"Cleanup: deleted {viz_deleted} visualizations for source {source_id}")
+    except Exception as e:
+        logger.error(f"Cleanup: failed to delete visualizations for source {source_id}: {e}")
+
+    return {
+        'insights_deleted': insights_deleted,
+        'visualizations_deleted': viz_deleted
+    }
+
+
 # ============================================================================
 # Migration from localStorage
 # ============================================================================

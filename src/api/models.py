@@ -99,6 +99,10 @@ class PostProcessingConfig(BaseModel):
         default=500,
         description="Batch size for indexing operations"
     )
+    rag_input_path: Optional[str] = Field(
+        default=None,
+        description="Override path for RAG indexing (if different from ETL output)"
+    )
 
 
 class PipelineConfig(BaseModel):

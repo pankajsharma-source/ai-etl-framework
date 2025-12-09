@@ -235,11 +235,24 @@ class PipelineService:
             logger.info(f"RAG API URL: {config.rag_api_url}")
             logger.info(f"Index name: {config.index_name}")
 
+            # Prefer rag_input_path (accessible in RAG container), fall back to output_files
+            rag_path = None
+            if hasattr(config, 'rag_input_path') and config.rag_input_path:
+                rag_path = config.rag_input_path
+            elif output_files and len(output_files) > 0:
+                rag_path = output_files[0]
+
+            if not rag_path:
+                logger.error("No RAG input path available for indexing")
+                return None
+
+            logger.info(f"RAG input path: {rag_path}")
+
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
                     f"{config.rag_api_url}/index/hybrid/local",
                     json={
-                        "path": "/app/data/input/sales",  # Index only sales data, not entire directory
+                        "path": rag_path,
                         "target_index": config.index_name,
                         "batch_size": config.batch_size
                     }
