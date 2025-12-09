@@ -377,6 +377,33 @@ async def delete_analytics_data_source(source_id: str, role: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.delete("/api/analytics/data-sources/{source_id}/cleanup")
+async def cleanup_data_source(source_id: str, role: str):
+    """
+    Delete all insights and visualizations for a data source.
+    Does NOT delete the data source configuration itself.
+
+    Args:
+        source_id: Data source ID
+        role: User role (query parameter)
+    """
+    try:
+        from src.database.analytics_db import cleanup_source_data
+
+        result = cleanup_source_data(role, source_id)
+
+        return {
+            "success": True,
+            "source_id": source_id,
+            "role": role,
+            "insights_deleted": result['insights_deleted'],
+            "visualizations_deleted": result['visualizations_deleted']
+        }
+    except Exception as e:
+        logger.error(f"Failed to cleanup data source: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.patch("/api/analytics/data-sources/{source_id}/last-run")
 async def update_source_last_run(source_id: str, role: str, last_run: Dict[str, Any]):
     """
@@ -690,6 +717,30 @@ async def get_analytics_visualizations(role: str, source_id: str = None):
         }
     except Exception as e:
         logger.error(f"Failed to get visualizations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/analytics/visualizations/sources")
+async def get_visualization_sources(role: str):
+    """
+    Get list of source IDs that have visualizations stored.
+    Used to filter the data source dropdown on the Visualizations page.
+
+    Args:
+        role: User role (required)
+    """
+    try:
+        from src.database.analytics_db import get_sources_with_visualizations
+
+        source_ids = get_sources_with_visualizations(role)
+
+        return {
+            "role": role,
+            "source_ids": source_ids,
+            "count": len(source_ids)
+        }
+    except Exception as e:
+        logger.error(f"Failed to get sources with visualizations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
