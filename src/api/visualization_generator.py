@@ -35,7 +35,8 @@ DARK_THEME = {
             'tickfont': {'color': '#9ca3af'}
         },
         'legend': {'font': {'color': '#9ca3af'}},
-        'colorway': ['#00d4ff', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16'],
+        # Soft, muted color palette - easier on the eyes
+        'colorway': ['#7dd3fc', '#86efac', '#fcd34d', '#fca5a5', '#c4b5fd', '#f9a8d4', '#a5f3fc', '#bef264'],
         'margin': {'l': 60, 'r': 30, 't': 50, 'b': 60}
     }
 }
@@ -246,12 +247,15 @@ def generate_plotly_chart(df: pd.DataFrame, chart_config: Dict[str, Any]) -> Dic
     color_col = chart_config.get('color_column')
     z_col = chart_config.get('z_column')
 
+    # Soft color palette for charts
+    soft_colors = ['#7dd3fc', '#86efac', '#fcd34d', '#fca5a5', '#c4b5fd', '#f9a8d4', '#a5f3fc', '#bef264']
+
     try:
         if chart_type == 'bar':
             # Aggregate data for bar chart
             agg_df = df.groupby(x_col)[y_col].sum().reset_index()
             agg_df = agg_df.sort_values(y_col, ascending=False).head(15)
-            fig = px.bar(agg_df, x=x_col, y=y_col, title=title)
+            fig = px.bar(agg_df, x=x_col, y=y_col, title=title, color_discrete_sequence=soft_colors)
 
         elif chart_type == 'line':
             # Sort by date for line chart
@@ -259,27 +263,28 @@ def generate_plotly_chart(df: pd.DataFrame, chart_config: Dict[str, Any]) -> Dic
             df_sorted[x_col] = pd.to_datetime(df_sorted[x_col])
             agg_df = df_sorted.groupby(x_col)[y_col].sum().reset_index()
             agg_df = agg_df.sort_values(x_col)
-            fig = px.line(agg_df, x=x_col, y=y_col, title=title, markers=True)
+            fig = px.line(agg_df, x=x_col, y=y_col, title=title, markers=True, color_discrete_sequence=soft_colors)
 
         elif chart_type == 'pie':
             value_counts = df[x_col].value_counts().head(10)
-            fig = px.pie(values=value_counts.values, names=value_counts.index, title=title)
+            fig = px.pie(values=value_counts.values, names=value_counts.index, title=title, color_discrete_sequence=soft_colors)
 
         elif chart_type == 'histogram':
-            fig = px.histogram(df, x=x_col, title=title, nbins=30)
+            fig = px.histogram(df, x=x_col, title=title, nbins=30, color_discrete_sequence=soft_colors)
 
         elif chart_type == 'scatter':
             sample_df = df.sample(min(1000, len(df)))  # Limit points for performance
             fig = px.scatter(sample_df, x=x_col, y=y_col, color=color_col,
-                           title=title, opacity=0.7)
+                           title=title, opacity=0.7, color_discrete_sequence=soft_colors)
 
         elif chart_type == 'box':
-            fig = px.box(df, x=x_col, y=y_col, title=title)
+            fig = px.box(df, x=x_col, y=y_col, title=title, color_discrete_sequence=soft_colors)
 
         elif chart_type == 'heatmap':
             pivot_df = df.pivot_table(values=z_col, index=y_col, columns=x_col, aggfunc='sum')
+            # Use soft blue-purple gradient for heatmap
             fig = px.imshow(pivot_df, title=title, aspect='auto',
-                          color_continuous_scale='Blues')
+                          color_continuous_scale=['#1e1b4b', '#4338ca', '#7dd3fc'])
         else:
             logger.warning(f"Unknown chart type: {chart_type}")
             return None

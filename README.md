@@ -363,7 +363,7 @@ monitoring:
 
 ```bash
 # Navigate to the project directory
-cd /Users/pankajsharma/Documents/Development/ads/ai-etl-framework
+cd /Users/pankajsharma/Documents/Development/thedatastudio/ai-etl-framework
 
 # Activate virtual environment
 source venv/bin/activate

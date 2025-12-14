@@ -278,7 +278,7 @@ If a required column isn't found:
 
 ```bash
 # 1. Navigate to project
-cd /Users/pankajsharma/Documents/Development/ads/ai-etl-framework
+cd /Users/pankajsharma/Documents/Development/thedatastudio/ai-etl-framework
 
 # 2. Activate environment
 source venv/bin/activate

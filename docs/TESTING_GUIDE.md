@@ -20,7 +20,7 @@ Before starting, ensure you have:
 
 ```bash
 # Navigate to project
-cd /Users/pankajsharma/Documents/Development/ads/ai-etl-framework
+cd /Users/pankajsharma/Documents/Development/thedatastudio/ai-etl-framework
 
 # Run setup script
 ./scripts/setup.sh
@@ -61,7 +61,7 @@ Press `y` if you want dev tools (pytest, black, mypy), or `n` for minimal instal
 ### Option B: Manual Setup
 
 ```bash
-cd /Users/pankajsharma/Documents/Development/ads/ai-etl-framework
+cd /Users/pankajsharma/Documents/Development/thedatastudio/ai-etl-framework
 
 # Create virtual environment
 python3 -m venv venv
@@ -128,8 +128,8 @@ python examples/simple_csv_pipeline.py
 ============================================================
 Starting Simple CSV to SQLite Pipeline
 ============================================================
-Input: /Users/pankajsharma/Documents/Development/ads/ai-etl-framework/data/sample.csv
-Output: /Users/pankajsharma/Documents/Development/ads/ai-etl-framework/output/sample.db
+Input: /Users/pankajsharma/Documents/Development/thedatastudio/ai-etl-framework/data/sample.csv
+Output: /Users/pankajsharma/Documents/Development/thedatastudio/ai-etl-framework/output/sample.db
 
 2025-01-08 10:00:00 - ai_etl.Pipeline - INFO - Starting pipeline execution: pipeline_1704700800
 2025-01-08 10:00:00 - ai_etl.Pipeline - INFO - Stage 1: Extract - Starting
@@ -165,7 +165,7 @@ Transformer Stats:
   - Errors: 0
 ============================================================
 
-Data saved to: /Users/pankajsharma/Documents/Development/ads/ai-etl-framework/output/sample.db
+Data saved to: /Users/pankajsharma/Documents/Development/thedatastudio/ai-etl-framework/output/sample.db
 
 To view the data, run:
   sqlite3 output/sample.db 'SELECT * FROM clean_data;'
