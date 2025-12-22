@@ -27,7 +27,7 @@ class StageStatus(str, Enum):
 
 class SourceConfig(BaseModel):
     """Source configuration"""
-    type: Literal["csv", "json", "api", "database"]
+    type: Literal["csv", "json", "api", "database", "postgresql"]
     path: Optional[str] = None
     url: Optional[str] = None
     connection_string: Optional[str] = None
@@ -91,9 +91,9 @@ class PostProcessingConfig(BaseModel):
         default="http://rag-api:8000",
         description="RAG API endpoint URL"
     )
-    index_name: str = Field(
-        ...,
-        description="Target index name for RAG system"
+    index_name: Optional[str] = Field(
+        default=None,
+        description="Target index name for RAG system (auto-generated if not provided)"
     )
     batch_size: int = Field(
         default=500,
@@ -109,6 +109,7 @@ class PipelineConfig(BaseModel):
     """Complete pipeline configuration"""
     name: str = Field(..., description="Pipeline name")
     mode: ExecutionMode = Field(..., description="Execution mode")
+    org_id: str = Field(..., description="Organization ID for multi-tenancy isolation")
     source: SourceConfig
     transformers: List[TransformerConfig] = []
     destination: Optional[DestinationConfig] = None  # Single destination (legacy)

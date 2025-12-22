@@ -762,6 +762,50 @@ curl http://localhost:8002/pipelines/status
 curl http://localhost:8002/adapters
 ```
 
+#### Authentication API
+
+The API includes authentication endpoints for user management:
+
+```bash
+# Sign up (creates user + organization)
+curl -X POST "http://localhost:8002/api/auth/signup" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "securepassword",
+    "name": "John Doe",
+    "org_name": "Acme Corp",
+    "industry": "technology"
+  }'
+
+# Login
+curl -X POST "http://localhost:8002/api/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "securepassword"
+  }'
+
+# Validate session (requires token from login/signup)
+curl "http://localhost:8002/api/auth/me" \
+  -H "Authorization: Bearer <your-jwt-token>"
+
+# Logout
+curl -X POST "http://localhost:8002/api/auth/logout"
+```
+
+**Authentication Flow:**
+1. User signs up with email, password, and organization details
+2. Server creates user, organization, and membership records
+3. Server returns JWT token (valid for 24 hours)
+4. Client stores token and includes in `Authorization: Bearer <token>` header
+5. All analytics endpoints require `org_id` parameter for data isolation
+
+**Password Requirements:**
+- Minimum 6 characters
+- Maximum 128 characters
+- Hashed using Argon2 algorithm
+
 #### Volume Mounts
 
 The Docker Compose setup includes:

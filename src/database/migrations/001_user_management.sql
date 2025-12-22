@@ -1,79 +1,73 @@
 -- ============================================================================
--- Analytics Interface Storage Schema v2.0
--- Multi-tenant with Organization-based isolation
+-- Migration 001: User Management Schema
+-- ============================================================================
+-- This migration:
+-- 1. Drops existing analytics tables (fresh start)
+-- 2. Creates user management tables (organizations, users, org_memberships)
+-- 3. Recreates analytics tables with org_id instead of role
 -- ============================================================================
 
 -- ============================================================================
--- User Management Tables
+-- STEP 1: Drop existing tables (fresh start)
+-- ============================================================================
+DROP TABLE IF EXISTS analytics_visualizations CASCADE;
+DROP TABLE IF EXISTS analytics_source_insights CASCADE;
+DROP TABLE IF EXISTS analytics_pipeline_history CASCADE;
+DROP TABLE IF EXISTS analytics_data_sources CASCADE;
+
+-- Drop old trigger function if exists
+DROP FUNCTION IF EXISTS update_updated_at_column() CASCADE;
+
+-- ============================================================================
+-- STEP 2: Create User Management Tables
 -- ============================================================================
 
 -- Organizations Table
--- Central entity for multi-tenancy
-CREATE TABLE IF NOT EXISTS organizations (
+CREATE TABLE organizations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(255) NOT NULL,
-    slug VARCHAR(100) UNIQUE NOT NULL,  -- URL-friendly identifier (e.g., "acme-corp")
-    industry VARCHAR(100),               -- For personalization (healthcare, finance, etc.)
+    slug VARCHAR(100) UNIQUE NOT NULL,
+    industry VARCHAR(100),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_org_slug ON organizations(slug);
-CREATE INDEX IF NOT EXISTS idx_org_industry ON organizations(industry);
+CREATE INDEX idx_org_slug ON organizations(slug);
+CREATE INDEX idx_org_industry ON organizations(industry);
 
 -- Users Table
--- Individual user accounts
-CREATE TABLE IF NOT EXISTS users (
+CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email VARCHAR(255) UNIQUE NOT NULL,
     name VARCHAR(255),
-    password_hash VARCHAR(255),           -- For local auth (null if OAuth only)
-    auth_provider VARCHAR(50) DEFAULT 'local',  -- 'local', 'google', 'github'
-    auth_provider_id VARCHAR(255),        -- External auth provider user ID
+    password_hash VARCHAR(255),
+    auth_provider VARCHAR(50) DEFAULT 'local',
+    auth_provider_id VARCHAR(255),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX idx_users_email ON users(email);
 
 -- Organization Memberships (Junction Table)
--- Links users to organizations with roles
-CREATE TABLE IF NOT EXISTS org_memberships (
+CREATE TABLE org_memberships (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    role VARCHAR(50) NOT NULL DEFAULT 'member',  -- 'owner', 'admin', 'member'
+    role VARCHAR(50) NOT NULL DEFAULT 'member',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, org_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_membership_user ON org_memberships(user_id);
-CREATE INDEX IF NOT EXISTS idx_membership_org ON org_memberships(org_id);
-
--- Organization Invites Table
--- Invite codes for adding users to organizations
-CREATE TABLE IF NOT EXISTS org_invites (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    code VARCHAR(20) UNIQUE NOT NULL,      -- Short invite code (e.g., "ABC123XY")
-    created_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role VARCHAR(50) NOT NULL DEFAULT 'member',  -- Role assigned on join
-    max_uses INTEGER DEFAULT 1,            -- How many times code can be used (null = unlimited)
-    use_count INTEGER DEFAULT 0,           -- Current number of uses
-    expires_at TIMESTAMP,                  -- Optional expiration (null = never expires)
-    is_active BOOLEAN DEFAULT true,        -- Can be deactivated by owner
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_invites_org ON org_invites(org_id);
-CREATE INDEX IF NOT EXISTS idx_invites_code ON org_invites(code);
+CREATE INDEX idx_membership_user ON org_memberships(user_id);
+CREATE INDEX idx_membership_org ON org_memberships(org_id);
 
 -- ============================================================================
--- Analytics Tables (org_id based isolation)
+-- STEP 3: Recreate Analytics Tables with org_id
 -- ============================================================================
 
 -- Data Sources Configuration Table
-CREATE TABLE IF NOT EXISTS analytics_data_sources (
+CREATE TABLE analytics_data_sources (
     id VARCHAR(50) NOT NULL,
     org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     name VARCHAR(255) NOT NULL,
@@ -86,10 +80,10 @@ CREATE TABLE IF NOT EXISTS analytics_data_sources (
     PRIMARY KEY (id, org_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_data_sources_org ON analytics_data_sources(org_id);
+CREATE INDEX idx_data_sources_org ON analytics_data_sources(org_id);
 
 -- Pipeline History Table
-CREATE TABLE IF NOT EXISTS analytics_pipeline_history (
+CREATE TABLE analytics_pipeline_history (
     id SERIAL PRIMARY KEY,
     org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     source_id VARCHAR(50) NOT NULL,
@@ -104,47 +98,45 @@ CREATE TABLE IF NOT EXISTS analytics_pipeline_history (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_history_org_time ON analytics_pipeline_history(org_id, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_history_source ON analytics_pipeline_history(source_id);
+CREATE INDEX idx_history_org_time ON analytics_pipeline_history(org_id, timestamp DESC);
+CREATE INDEX idx_history_source ON analytics_pipeline_history(source_id);
 
 -- AI-Generated Source Insights Table
-CREATE TABLE IF NOT EXISTS analytics_source_insights (
+CREATE TABLE analytics_source_insights (
     id SERIAL PRIMARY KEY,
     source_id VARCHAR(50) NOT NULL,
     org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     source_name VARCHAR(255),
     source_icon VARCHAR(10),
     data_summary TEXT,
-    insights JSONB,  -- Array of insight strings
+    insights JSONB,
     records_analyzed INTEGER DEFAULT 0,
-    generated_from VARCHAR(10),  -- 'etl' or 'rag' - ETL takes precedence
+    generated_from VARCHAR(10),
     generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(source_id, org_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_insights_org ON analytics_source_insights(org_id);
+CREATE INDEX idx_insights_org ON analytics_source_insights(org_id);
 
 -- Auto-Generated Visualizations Table
-CREATE TABLE IF NOT EXISTS analytics_visualizations (
+CREATE TABLE analytics_visualizations (
     id SERIAL PRIMARY KEY,
     source_id VARCHAR(50) NOT NULL,
     org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    chart_type VARCHAR(50) NOT NULL,      -- 'bar', 'line', 'pie', 'scatter', 'histogram', 'box', 'heatmap'
+    chart_type VARCHAR(50) NOT NULL,
     chart_title VARCHAR(255),
     x_column VARCHAR(100),
     y_column VARCHAR(100),
-    chart_config JSONB NOT NULL,          -- Full Plotly JSON configuration
+    chart_config JSONB NOT NULL,
     generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(source_id, org_id, chart_type, x_column, y_column)
 );
 
-CREATE INDEX IF NOT EXISTS idx_viz_source_org ON analytics_visualizations(source_id, org_id);
+CREATE INDEX idx_viz_source_org ON analytics_visualizations(source_id, org_id);
 
 -- ============================================================================
--- Triggers
+-- STEP 4: Create updated_at trigger function
 -- ============================================================================
-
--- Update trigger for updated_at columns
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -153,23 +145,33 @@ BEGIN
 END;
 $$ language 'plpgsql';
 
--- Apply to organizations
-DROP TRIGGER IF EXISTS update_organizations_updated_at ON organizations;
+-- Apply trigger to tables with updated_at
 CREATE TRIGGER update_organizations_updated_at
     BEFORE UPDATE ON organizations
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
 
--- Apply to users
-DROP TRIGGER IF EXISTS update_users_updated_at ON users;
 CREATE TRIGGER update_users_updated_at
     BEFORE UPDATE ON users
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
 
--- Apply to data_sources
-DROP TRIGGER IF EXISTS update_data_sources_updated_at ON analytics_data_sources;
 CREATE TRIGGER update_data_sources_updated_at
     BEFORE UPDATE ON analytics_data_sources
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================================================
+-- STEP 5: Create demo organization for testing
+-- ============================================================================
+INSERT INTO organizations (name, slug, industry)
+VALUES ('Demo Organization', 'demo', 'healthcare');
+
+-- ============================================================================
+-- Migration Complete
+-- ============================================================================
+-- Next steps:
+-- 1. Update analytics_db.py to use org_id instead of role
+-- 2. Update API endpoints to pass org_id
+-- 3. Re-run ETL pipelines to populate fresh data
+-- ============================================================================

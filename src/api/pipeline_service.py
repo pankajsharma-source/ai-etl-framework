@@ -177,7 +177,8 @@ class PipelineService:
                 rag_job_id = await self.trigger_rag_indexing(
                     pipeline_id=pipeline_id,
                     output_files=output_files,
-                    config=config.post_processing
+                    config=config.post_processing,
+                    org_id=config.org_id
                 )
 
             # Build response with optional RAG job ID
@@ -215,7 +216,8 @@ class PipelineService:
         self,
         pipeline_id: str,
         output_files: List[str],
-        config
+        config,
+        org_id: str
     ) -> Optional[str]:
         """
         Trigger RAG indexing after successful pipeline execution
@@ -224,6 +226,7 @@ class PipelineService:
             pipeline_id: Pipeline identifier
             output_files: List of output file paths from pipeline
             config: PostProcessingConfig with RAG settings
+            org_id: Organization ID for multi-tenancy isolation
 
         Returns:
             job_id from RAG API, or None if failed
@@ -248,13 +251,16 @@ class PipelineService:
 
             logger.info(f"RAG input path: {rag_path}")
 
+            logger.info(f"Organization ID: {org_id}")
+
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
                     f"{config.rag_api_url}/index/hybrid/local",
                     json={
                         "path": rag_path,
                         "target_index": config.index_name,
-                        "batch_size": config.batch_size
+                        "batch_size": config.batch_size,
+                        "org_id": org_id
                     }
                 )
 
