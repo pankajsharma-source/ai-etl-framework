@@ -899,6 +899,287 @@ async def _generate_and_save_insights(
 
 
 # ============================================================================
+# INTERACTIVE DASHBOARD ENDPOINTS (DuckDB-powered)
+# ============================================================================
+
+@app.get("/api/analytics/dashboard/schema/{source_id}")
+async def get_dashboard_schema(source_id: str, org_id: str):
+    """
+    Get schema metadata for a data source for filter panel construction.
+
+    Returns column information including types, distinct values, and min/max ranges.
+    Used by the frontend to dynamically build filter controls.
+
+    Args:
+        source_id: Data source ID
+        org_id: Organization UUID (query parameter)
+    """
+    try:
+        from src.database.duckdb_service import get_duckdb_service, Filter
+        from src.database.analytics_db import get_data_sources, get_organization_by_id
+
+        # Get org slug for file path
+        org = get_organization_by_id(org_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+
+        org_slug = org.get('slug', org_id)
+
+        # Get source info for the slug
+        sources = get_data_sources(org_id)
+        source = next((s for s in sources if s['id'] == source_id), None)
+        if not source:
+            raise HTTPException(status_code=404, detail="Data source not found")
+
+        # Slugify source name
+        from src.api.path_generator import slugify
+        source_slug = slugify(source['name'])
+
+        # Get schema from DuckDB
+        duckdb_service = get_duckdb_service()
+        schema = duckdb_service.get_schema(org_slug, source_slug)
+
+        return {
+            "org_id": org_id,
+            "source_id": source_id,
+            "source_name": source['name'],
+            **schema
+        }
+
+    except FileNotFoundError as e:
+        logger.warning(f"Data file not found for dashboard schema: {e}")
+        raise HTTPException(status_code=404, detail="Data file not found. Run ETL pipeline first.")
+    except Exception as e:
+        logger.error(f"Failed to get dashboard schema: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/analytics/dashboard/query")
+async def query_dashboard_data(data: Dict[str, Any]):
+    """
+    Execute filtered aggregation query for chart data.
+
+    Used by the interactive dashboard to refresh charts with current filters.
+
+    Body:
+        {
+            "org_id": "uuid",
+            "source_id": "source-123",
+            "filters": [
+                {"column": "region", "operator": "in", "value": ["North", "East"]},
+                {"column": "order_date", "operator": "between", "value": ["2024-01-01", "2024-06-30"]}
+            ],
+            "aggregation": {
+                "group_by": ["product_category"],
+                "metrics": [{"column": "amount", "agg": "sum", "alias": "total_amount"}],
+                "order_by": "total_amount",
+                "order_desc": true,
+                "limit": 20
+            }
+        }
+    """
+    try:
+        from src.database.duckdb_service import get_duckdb_service, Filter, AggregationSpec
+        from src.database.analytics_db import get_data_sources, get_organization_by_id
+
+        org_id = data.get('org_id')
+        source_id = data.get('source_id')
+
+        if not org_id or not source_id:
+            raise HTTPException(status_code=400, detail="org_id and source_id are required")
+
+        # Get org slug
+        org = get_organization_by_id(org_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        org_slug = org.get('slug', org_id)
+
+        # Get source slug
+        sources = get_data_sources(org_id)
+        source = next((s for s in sources if s['id'] == source_id), None)
+        if not source:
+            raise HTTPException(status_code=404, detail="Data source not found")
+
+        from src.api.path_generator import slugify
+        source_slug = slugify(source['name'])
+
+        # Parse filters
+        filters = []
+        for f in data.get('filters', []):
+            filters.append(Filter(
+                column=f['column'],
+                operator=f['operator'],
+                value=f.get('value')
+            ))
+
+        # Parse aggregation
+        agg_data = data.get('aggregation', {})
+        aggregation = AggregationSpec(
+            group_by=agg_data.get('group_by', []),
+            metrics=agg_data.get('metrics', []),
+            order_by=agg_data.get('order_by'),
+            order_desc=agg_data.get('order_desc', True),
+            limit=agg_data.get('limit')
+        )
+
+        # Execute query
+        duckdb_service = get_duckdb_service()
+        result = duckdb_service.query_with_filters(
+            org_slug=org_slug,
+            source_slug=source_slug,
+            filters=filters,
+            aggregation=aggregation
+        )
+
+        return result
+
+    except FileNotFoundError as e:
+        logger.warning(f"Data file not found for dashboard query: {e}")
+        raise HTTPException(status_code=404, detail="Data file not found. Run ETL pipeline first.")
+    except Exception as e:
+        logger.error(f"Failed to execute dashboard query: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/analytics/dashboard/drill-down")
+async def get_drill_down_records(data: Dict[str, Any]):
+    """
+    Get raw records for drill-down view.
+
+    Used when user clicks on a chart element to see the underlying data.
+
+    Body:
+        {
+            "org_id": "uuid",
+            "source_id": "source-123",
+            "dimension": "product_category",
+            "dimension_value": "Electronics",
+            "filters": [...],
+            "columns": ["order_id", "customer", "amount"],  // optional
+            "limit": 100,
+            "offset": 0
+        }
+    """
+    try:
+        from src.database.duckdb_service import get_duckdb_service, Filter
+        from src.database.analytics_db import get_data_sources, get_organization_by_id
+
+        org_id = data.get('org_id')
+        source_id = data.get('source_id')
+        dimension = data.get('dimension')
+        dimension_value = data.get('dimension_value')
+
+        if not all([org_id, source_id, dimension]):
+            raise HTTPException(
+                status_code=400,
+                detail="org_id, source_id, and dimension are required"
+            )
+
+        # Get org and source slugs
+        org = get_organization_by_id(org_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        org_slug = org.get('slug', org_id)
+
+        sources = get_data_sources(org_id)
+        source = next((s for s in sources if s['id'] == source_id), None)
+        if not source:
+            raise HTTPException(status_code=404, detail="Data source not found")
+
+        from src.api.path_generator import slugify
+        source_slug = slugify(source['name'])
+
+        # Parse filters
+        filters = []
+        for f in data.get('filters', []):
+            filters.append(Filter(
+                column=f['column'],
+                operator=f['operator'],
+                value=f.get('value')
+            ))
+
+        # Execute drill-down query
+        duckdb_service = get_duckdb_service()
+        result = duckdb_service.get_drill_down_data(
+            org_slug=org_slug,
+            source_slug=source_slug,
+            dimension=dimension,
+            dimension_value=dimension_value,
+            filters=filters,
+            columns=data.get('columns'),
+            limit=data.get('limit', 100),
+            offset=data.get('offset', 0)
+        )
+
+        return result
+
+    except FileNotFoundError as e:
+        logger.warning(f"Data file not found for drill-down: {e}")
+        raise HTTPException(status_code=404, detail="Data file not found. Run ETL pipeline first.")
+    except Exception as e:
+        logger.error(f"Failed to get drill-down data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/analytics/dashboard/filter-values/{source_id}")
+async def get_filter_values(
+    source_id: str,
+    org_id: str,
+    column: str,
+    search: str = None,
+    limit: int = 100
+):
+    """
+    Get distinct values for a column (for filter dropdowns).
+
+    Supports search for high-cardinality columns.
+
+    Args:
+        source_id: Data source ID
+        org_id: Organization UUID
+        column: Column to get values for
+        search: Optional search term to filter values
+        limit: Maximum values to return (default 100)
+    """
+    try:
+        from src.database.duckdb_service import get_duckdb_service
+        from src.database.analytics_db import get_data_sources, get_organization_by_id
+
+        # Get org and source slugs
+        org = get_organization_by_id(org_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        org_slug = org.get('slug', org_id)
+
+        sources = get_data_sources(org_id)
+        source = next((s for s in sources if s['id'] == source_id), None)
+        if not source:
+            raise HTTPException(status_code=404, detail="Data source not found")
+
+        from src.api.path_generator import slugify
+        source_slug = slugify(source['name'])
+
+        # Get values
+        duckdb_service = get_duckdb_service()
+        result = duckdb_service.get_filter_values(
+            org_slug=org_slug,
+            source_slug=source_slug,
+            column=column,
+            search=search,
+            limit=limit
+        )
+
+        return result
+
+    except FileNotFoundError as e:
+        logger.warning(f"Data file not found for filter values: {e}")
+        raise HTTPException(status_code=404, detail="Data file not found. Run ETL pipeline first.")
+    except Exception as e:
+        logger.error(f"Failed to get filter values: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # VISUALIZATION ENDPOINTS
 # ============================================================================
 

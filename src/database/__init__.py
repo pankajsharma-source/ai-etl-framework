@@ -83,5 +83,19 @@ __all__ = [
     'get_sources_with_visualizations',
 
     # Cleanup
-    'cleanup_source_data'
+    'cleanup_source_data',
+
+    # DuckDB Analytics
+    'get_duckdb_service',
+    'DuckDBService',
+    'Filter',
+    'AggregationSpec'
 ]
+
+# DuckDB Analytics Service
+from .duckdb_service import (
+    get_duckdb_service,
+    DuckDBService,
+    Filter,
+    AggregationSpec
+)
