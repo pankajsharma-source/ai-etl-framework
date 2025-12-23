@@ -1029,7 +1029,8 @@ def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
         with get_db_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute("""
-                    SELECT id, email, name, password_hash, auth_provider, created_at, updated_at
+                    SELECT id, email, name, password_hash, auth_provider, is_superuser,
+                           created_at, updated_at
                     FROM users
                     WHERE email = %s
                 """, (email,))
@@ -1430,4 +1431,274 @@ def remove_org_member(org_id: str, user_id: str) -> bool:
         return True
     except Exception as e:
         logger.error(f"Failed to remove org member: {e}")
+        raise
+
+
+# ============================================================================
+# Superuser / Admin Operations
+# ============================================================================
+
+def is_user_superuser(user_id: str) -> bool:
+    """
+    Check if a user is a superuser.
+
+    Args:
+        user_id: User UUID
+
+    Returns:
+        True if user is a superuser, False otherwise
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT is_superuser FROM users WHERE id = %s
+                """, (user_id,))
+
+                row = cursor.fetchone()
+                if row:
+                    return row[0] is True
+                return False
+    except Exception as e:
+        logger.error(f"Failed to check superuser status: {e}")
+        return False
+
+
+def get_all_users() -> List[Dict[str, Any]]:
+    """
+    Get all users with their organization memberships (admin only).
+
+    Returns:
+        List of user dictionaries with org info
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT u.id, u.email, u.name, u.auth_provider, u.is_superuser,
+                           u.created_at, u.updated_at,
+                           COALESCE(
+                               json_agg(
+                                   json_build_object(
+                                       'id', o.id,
+                                       'name', o.name,
+                                       'slug', o.slug,
+                                       'role', m.role
+                                   )
+                               ) FILTER (WHERE o.id IS NOT NULL),
+                               '[]'
+                           ) as organizations
+                    FROM users u
+                    LEFT JOIN org_memberships m ON u.id = m.user_id
+                    LEFT JOIN organizations o ON m.org_id = o.id
+                    GROUP BY u.id
+                    ORDER BY u.created_at DESC
+                """)
+
+                rows = cursor.fetchall()
+                return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"Failed to get all users: {e}")
+        raise
+
+
+def get_all_organizations() -> List[Dict[str, Any]]:
+    """
+    Get all organizations with member counts and usage stats (admin only).
+
+    Returns:
+        List of organization dictionaries with member counts and pipeline runs
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT o.id, o.name, o.slug, o.industry, o.created_at, o.updated_at,
+                           COUNT(m.user_id) as member_count,
+                           (SELECT COUNT(*) FROM analytics_data_sources WHERE org_id = o.id) as source_count,
+                           (SELECT COUNT(*) FROM analytics_pipeline_history WHERE org_id = o.id) as pipeline_runs
+                    FROM organizations o
+                    LEFT JOIN org_memberships m ON o.id = m.org_id
+                    GROUP BY o.id
+                    ORDER BY o.created_at DESC
+                """)
+
+                rows = cursor.fetchall()
+                return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"Failed to get all organizations: {e}")
+        raise
+
+
+def set_superuser_status(user_id: str, is_superuser: bool) -> bool:
+    """
+    Grant or revoke superuser status for a user.
+
+    Args:
+        user_id: User UUID
+        is_superuser: True to grant, False to revoke
+
+    Returns:
+        True if successful
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE users
+                    SET is_superuser = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (is_superuser, user_id))
+
+                if cursor.rowcount == 0:
+                    logger.warning(f"User {user_id} not found")
+                    return False
+
+        action = "granted" if is_superuser else "revoked"
+        logger.info(f"Superuser status {action} for user {user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to set superuser status: {e}")
+        raise
+
+
+def admin_delete_organization(org_id: str) -> Dict[str, Any]:
+    """
+    Delete an organization and all associated data (admin only).
+    Cascading deletes handle memberships, invites, sources, etc.
+
+    Args:
+        org_id: Organization UUID
+
+    Returns:
+        Dict with deletion details
+    """
+    result = {
+        'success': False,
+        'org_deleted': False,
+        'members_removed': 0,
+        'sources_deleted': 0
+    }
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                # Get counts before deletion
+                cursor.execute("SELECT COUNT(*) FROM org_memberships WHERE org_id = %s", (org_id,))
+                result['members_removed'] = cursor.fetchone()[0]
+
+                cursor.execute("SELECT COUNT(*) FROM analytics_data_sources WHERE org_id = %s", (org_id,))
+                result['sources_deleted'] = cursor.fetchone()[0]
+
+                # Delete organization (cascades to memberships, invites, sources, etc.)
+                cursor.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+
+                if cursor.rowcount > 0:
+                    result['org_deleted'] = True
+                    result['success'] = True
+                    logger.info(f"Deleted organization {org_id}")
+                else:
+                    logger.warning(f"Organization {org_id} not found")
+
+        return result
+    except Exception as e:
+        logger.error(f"Failed to delete organization: {e}")
+        raise
+
+
+def admin_delete_user(user_id: str) -> Dict[str, Any]:
+    """
+    Delete a user and all associated data (admin only).
+    Cascading deletes handle memberships.
+
+    Args:
+        user_id: User UUID
+
+    Returns:
+        Dict with deletion details
+    """
+    result = {
+        'success': False,
+        'user_deleted': False,
+        'memberships_removed': 0
+    }
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                # Get membership count before deletion
+                cursor.execute("SELECT COUNT(*) FROM org_memberships WHERE user_id = %s", (user_id,))
+                result['memberships_removed'] = cursor.fetchone()[0]
+
+                # Delete user (cascades to memberships and invites created by this user)
+                cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
+
+                if cursor.rowcount > 0:
+                    result['user_deleted'] = True
+                    result['success'] = True
+                    logger.info(f"Deleted user {user_id}")
+                else:
+                    logger.warning(f"User {user_id} not found")
+
+        return result
+    except Exception as e:
+        logger.error(f"Failed to delete user: {e}")
+        raise
+
+
+def get_admin_stats() -> Dict[str, Any]:
+    """
+    Get platform-wide statistics for admin dashboard.
+
+    Returns:
+        Dict with platform statistics
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                # Total users
+                cursor.execute("SELECT COUNT(*) FROM users")
+                total_users = cursor.fetchone()[0]
+
+                # Superusers
+                cursor.execute("SELECT COUNT(*) FROM users WHERE is_superuser = true")
+                superuser_count = cursor.fetchone()[0]
+
+                # Total organizations
+                cursor.execute("SELECT COUNT(*) FROM organizations")
+                total_orgs = cursor.fetchone()[0]
+
+                # Total data sources
+                cursor.execute("SELECT COUNT(*) FROM analytics_data_sources")
+                total_sources = cursor.fetchone()[0]
+
+                # Total pipeline runs
+                cursor.execute("SELECT COUNT(*) FROM analytics_pipeline_history")
+                total_runs = cursor.fetchone()[0]
+
+                # Users created in last 7 days
+                cursor.execute("""
+                    SELECT COUNT(*) FROM users
+                    WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '7 days'
+                """)
+                recent_users = cursor.fetchone()[0]
+
+                # Orgs created in last 7 days
+                cursor.execute("""
+                    SELECT COUNT(*) FROM organizations
+                    WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '7 days'
+                """)
+                recent_orgs = cursor.fetchone()[0]
+
+        return {
+            'totalUsers': total_users,
+            'superuserCount': superuser_count,
+            'totalOrganizations': total_orgs,
+            'totalDataSources': total_sources,
+            'totalPipelineRuns': total_runs,
+            'recentUsers': recent_users,
+            'recentOrganizations': recent_orgs
+        }
+    except Exception as e:
+        logger.error(f"Failed to get admin stats: {e}")
         raise

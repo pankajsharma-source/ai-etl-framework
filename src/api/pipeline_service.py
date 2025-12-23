@@ -15,8 +15,7 @@ from src.api.models import (
     StageStatus,
     StageResult
 )
-from src.orchestration.pipeline import Pipeline
-from src.orchestration.staged_pipeline import StagedPipeline, StageResult as CoreStageResult
+from src.orchestration.pipeline import Pipeline, StageResult as CoreStageResult
 from src.storage.file_storage import FileStorage
 from src.storage.s3_storage import S3Storage
 from src.adapters.sources.csv_source import CSVSource
@@ -50,7 +49,7 @@ class PipelineService:
     def __init__(self):
         # In-memory state (replace with DynamoDB for production)
         self.pipelines: Dict[str, Dict[str, Any]] = {}
-        self.staged_pipelines: Dict[str, StagedPipeline] = {}
+        self.staged_pipelines: Dict[str, Pipeline] = {}
 
     def get_active_pipelines(self) -> List[str]:
         """Get list of active pipeline IDs"""
@@ -288,14 +287,16 @@ class PipelineService:
         try:
             started_at = datetime.utcnow()
 
-            # Create storage
-            storage = self._build_storage(config.storage)
+            # Get storage path from config
+            storage_path = ".pipeline_cache"
+            if config.storage and config.storage.path:
+                storage_path = config.storage.path
 
-            # Create staged pipeline
-            staged_pipeline = StagedPipeline(
+            # Create pipeline with staged execution support (cleanup_cache=False)
+            staged_pipeline = Pipeline(
                 pipeline_id=pipeline_id,
-                storage=storage,
-                config=config.model_dump()
+                cache_dir=storage_path,
+                cleanup_cache=False  # Keep data between stages
             )
 
             # Store references
@@ -542,7 +543,7 @@ class PipelineService:
     # Helper Methods
     # ============================================================
 
-    def _get_staged_pipeline(self, pipeline_id: str) -> StagedPipeline:
+    def _get_staged_pipeline(self, pipeline_id: str) -> Pipeline:
         """Get staged pipeline or raise error"""
         if pipeline_id not in self.staged_pipelines:
             raise ValueError(f"Staged pipeline not found: {pipeline_id}")

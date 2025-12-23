@@ -11,9 +11,40 @@ import plotly.express as px
 import plotly.graph_objects as go
 from typing import Dict, List, Any, Optional, Tuple
 import json
+import base64
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def decode_plotly_binary(obj):
+    """
+    Recursively decode binary-encoded arrays in Plotly JSON.
+    Plotly 6.x encodes numpy arrays as {'dtype': 'xx', 'bdata': 'base64...'}.
+    This function converts them back to regular lists.
+    """
+    if isinstance(obj, dict):
+        if 'bdata' in obj and 'dtype' in obj:
+            # This is a binary-encoded array
+            try:
+                dtype_map = {
+                    'i1': np.int8, 'i2': np.int16, 'i4': np.int32, 'i8': np.int64,
+                    'u1': np.uint8, 'u2': np.uint16, 'u4': np.uint32, 'u8': np.uint64,
+                    'f4': np.float32, 'f8': np.float64
+                }
+                dtype = dtype_map.get(obj['dtype'], np.float64)
+                data = base64.b64decode(obj['bdata'])
+                arr = np.frombuffer(data, dtype=dtype)
+                return arr.tolist()
+            except Exception as e:
+                logger.warning(f"Failed to decode binary array: {e}")
+                return obj
+        else:
+            return {k: decode_plotly_binary(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [decode_plotly_binary(item) for item in obj]
+    else:
+        return obj
 
 # Dark theme template matching AI Studio UI
 DARK_THEME = {
@@ -95,11 +126,79 @@ def analyze_dataframe(df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
                 info['dtype'] = 'categorical'
 
         # Check if likely an ID column
+        # Only use uniqueness as ID signal for larger datasets (>20 rows)
+        # to avoid flagging all columns as IDs in small master data tables
+        # But don't flag monetary/value columns as IDs even if unique
+        monetary_terms = ['spend', 'amount', 'total', 'sum', 'revenue', 'sales', 'cost', 'price', 'payment', 'balance', 'income', 'profit', 'loss', 'fee', 'charge', 'value', 'worth']
+        is_monetary = any(term in col.lower() for term in monetary_terms)
+
         info['is_id'] = (
-            'id' in col.lower() or
-            '_id' in col.lower() or
-            col.lower().endswith('_id') or
-            (info['unique_count'] == len(df) and info['dtype'] in ['numeric', 'categorical'])
+            ('id' in col.lower() or '_id' in col.lower() or col.lower().endswith('_id')) and not is_monetary
+        ) or (
+            # Uniqueness-based ID detection - only for non-monetary columns
+            len(df) > 20 and
+            info['unique_count'] == len(df) and
+            info['dtype'] == 'categorical' and  # Only categorical, not numeric (numeric unique values are often valid data)
+            not is_monetary
+        )
+
+        # Check if boolean-like column (should not be aggregated as numeric)
+        # Detect by name pattern or by having only 0/1 or True/False values
+        boolean_name_patterns = ['is_', 'has_', 'can_', 'should_', 'was_', 'will_', 'did_', 'does_', 'active', 'enabled', 'disabled', 'valid', 'verified']
+        is_boolean_name = any(col.lower().startswith(p) or col.lower().endswith(p.rstrip('_')) for p in boolean_name_patterns)
+
+        # Check if values are binary (only 0/1 or True/False)
+        is_binary_values = False
+        if info['dtype'] == 'numeric' and info['unique_count'] <= 2:
+            unique_vals = set(col_data.dropna().unique())
+            is_binary_values = unique_vals.issubset({0, 1, 0.0, 1.0, True, False})
+
+        info['is_boolean_like'] = is_boolean_name or is_binary_values or info['dtype'] == 'boolean'
+
+        # Check if percentage/rate column (summing percentages is meaningless)
+        # Be careful: "hourly_rate", "pay_rate" are monetary values, NOT percentages
+        # Only flag as rate if it's clearly a percentage/ratio type
+        rate_patterns = ['percent', 'pct', 'ratio', 'score', 'rating', 'rank', 'conversion_rate', 'interest_rate', 'tax_rate', 'discount_rate']
+        # Exclude monetary rates like hourly_rate, pay_rate, billing_rate
+        monetary_rate_patterns = ['hourly_rate', 'pay_rate', 'billing_rate', 'wage_rate', 'salary_rate']
+        is_monetary_rate = any(p in col.lower() for p in monetary_rate_patterns)
+        info['is_rate'] = any(p in col.lower() for p in rate_patterns) and not is_monetary_rate
+
+        # Check if unit price column (should average, not sum)
+        unit_price_patterns = ['unit_price', 'price_per', 'cost_per', 'rate_per', 'per_unit', 'each']
+        info['is_unit_price'] = any(p in col.lower() for p in unit_price_patterns)
+
+        # Check if code column (looks numeric but is categorical)
+        code_patterns = ['zip', 'postal', 'phone', 'sku', 'upc', 'barcode', 'code', 'pin']
+        is_code_by_name = any(p in col.lower() for p in code_patterns)
+        # Exclude measurement columns that might look like codes
+        measurement_patterns = ['square', 'footage', 'area', 'size', 'length', 'width', 'height', 'weight', 'volume', 'capacity', 'distance']
+        is_measurement = any(p in col.lower() for p in measurement_patterns)
+        info['is_code'] = is_code_by_name and not is_measurement
+
+        # Check if year/month column (should not be summed)
+        year_month_patterns = ['year', 'month', 'yr', 'mo', '_yy', '_mm']
+        is_year_month_by_name = any(p in col.lower() for p in year_month_patterns)
+        # Detect year values (1900-2100 range, few unique values)
+        is_year_by_value = False
+        if info['dtype'] == 'numeric' and info['unique_count'] <= 50:
+            if info.get('min') and info.get('max'):
+                if 1900 <= info['min'] <= 2100 and 1900 <= info['max'] <= 2100:
+                    is_year_by_value = True
+        info['is_year_month'] = is_year_month_by_name or is_year_by_value
+
+        # Check if sequential/index column
+        index_patterns = ['index', 'idx', 'row_num', 'row_number', 'sequence', 'seq', 'line_num']
+        info['is_index'] = any(p in col.lower() for p in index_patterns)
+
+        # Mark as non-aggregatable if any of the above
+        info['is_non_aggregatable'] = (
+            info['is_boolean_like'] or
+            info['is_rate'] or
+            info['is_unit_price'] or
+            info['is_code'] or
+            info['is_year_month'] or
+            info['is_index']
         )
 
         # Check if geographic
@@ -139,8 +238,10 @@ def select_chart_types(analysis: Dict[str, Dict], df: pd.DataFrame, max_charts: 
     charts = []
 
     # Separate columns by type
+    # Exclude non-aggregatable columns from numeric - they shouldn't be summed
+    # (booleans, percentages, rates, codes, years, etc.)
     numeric_cols = [c for c, info in analysis.items()
-                    if info['dtype'] == 'numeric' and not info['is_id']]
+                    if info['dtype'] == 'numeric' and not info['is_id'] and not info.get('is_non_aggregatable')]
     categorical_cols = [c for c, info in analysis.items()
                         if info['dtype'] == 'categorical' and not info['is_id']
                         and info['unique_count'] <= 20]
@@ -148,6 +249,12 @@ def select_chart_types(analysis: Dict[str, Dict], df: pd.DataFrame, max_charts: 
                      if info['dtype'] == 'datetime']
     geographic_cols = [c for c, info in analysis.items()
                        if info.get('is_geographic') and info['dtype'] == 'categorical']
+    # Boolean columns can be used for pie/distribution charts (count-based)
+    boolean_cols = [c for c, info in analysis.items()
+                    if info.get('is_boolean_like') and not info['is_id']]
+    # Code columns should be treated as categorical for charts
+    code_cols = [c for c, info in analysis.items()
+                 if info.get('is_code') and not info['is_id']]
 
     # 1. Bar charts: Categorical + Numeric (highest priority for business data)
     for cat_col in categorical_cols[:3]:
@@ -183,6 +290,15 @@ def select_chart_types(analysis: Dict[str, Dict], df: pd.DataFrame, max_charts: 
             })
             break  # Only one pie chart
 
+    # 3b. Pie charts for boolean columns (True/False distribution is meaningful)
+    for bool_col in boolean_cols[:1]:  # Only one boolean pie chart
+        charts.append({
+            'chart_type': 'pie',
+            'title': f'{bool_col} Distribution',
+            'x_column': bool_col,
+            'priority': 5
+        })
+
     # 4. Histograms: Numeric distributions
     for num_col in numeric_cols[:2]:
         if analysis[num_col]['unique_count'] > 10:
@@ -217,17 +333,25 @@ def select_chart_types(analysis: Dict[str, Dict], df: pd.DataFrame, max_charts: 
                 })
 
     # 7. Heatmap: Two categorical + numeric
+    # Only create heatmap if there's actual cross-tabulation (not 1-to-1 relationship)
     if len(categorical_cols) >= 2 and len(numeric_cols) >= 1:
         cat1, cat2 = categorical_cols[0], categorical_cols[1]
         if analysis[cat1]['unique_count'] <= 10 and analysis[cat2]['unique_count'] <= 10:
-            charts.append({
-                'chart_type': 'heatmap',
-                'title': f'{numeric_cols[0]} by {cat1} and {cat2}',
-                'x_column': cat1,
-                'y_column': cat2,
-                'z_column': numeric_cols[0],
-                'priority': 5
-            })
+            # Check if columns have a 1-to-1 relationship (useless for heatmap)
+            # If unique combinations equals both unique counts, it's likely 1-to-1
+            unique_combinations = df[[cat1, cat2]].drop_duplicates().shape[0]
+            min_unique = min(analysis[cat1]['unique_count'], analysis[cat2]['unique_count'])
+            # Only create heatmap if there's actual cross-tabulation
+            # (multiple values per cell, not just a diagonal)
+            if unique_combinations < min_unique or len(df) > unique_combinations * 1.5:
+                charts.append({
+                    'chart_type': 'heatmap',
+                    'title': f'{numeric_cols[0]} by {cat1} and {cat2}',
+                    'x_column': cat1,
+                    'y_column': cat2,
+                    'z_column': numeric_cols[0],
+                    'priority': 5
+                })
 
     # Sort by priority and limit
     charts.sort(key=lambda x: x['priority'], reverse=True)
@@ -267,7 +391,43 @@ def generate_plotly_chart(df: pd.DataFrame, chart_config: Dict[str, Any]) -> Dic
 
         elif chart_type == 'pie':
             value_counts = df[x_col].value_counts().head(10)
-            fig = px.pie(values=value_counts.values, names=value_counts.index, title=title, color_discrete_sequence=soft_colors)
+            values = value_counts.values.tolist()
+            labels = value_counts.index.tolist()
+
+            # Convert boolean labels to human-readable strings
+            # Use column name to create meaningful labels (e.g., is_active -> Active/Inactive)
+            if all(isinstance(l, (bool, np.bool_)) or l in [0, 1, True, False] for l in labels):
+                # Extract the meaningful part of the column name
+                col_name = x_col.lower().replace('is_', '').replace('has_', '').replace('_', ' ').title()
+                label_map = {
+                    True: col_name,
+                    False: f'Not {col_name}',
+                    1: col_name,
+                    0: f'Not {col_name}'
+                }
+                labels = [label_map.get(l, str(l)) for l in labels]
+
+            fig = px.pie(values=values, names=labels, title=title, color_discrete_sequence=soft_colors)
+
+            # Improve label positioning to avoid overlap
+            fig.update_traces(
+                textposition='inside',
+                textinfo='percent',  # Show only percentage inside
+                insidetextorientation='horizontal',
+            )
+            # Hide legend since labels are shown, and adjust margins
+            fig.update_layout(
+                showlegend=True,
+                legend=dict(
+                    orientation='h',
+                    yanchor='top',
+                    y=-0.15,  # Position below the chart
+                    xanchor='center',
+                    x=0.5,
+                    font=dict(size=10)
+                ),
+                margin=dict(b=80)  # Add bottom margin for legend
+            )
 
         elif chart_type == 'histogram':
             fig = px.histogram(df, x=x_col, title=title, nbins=30, color_discrete_sequence=soft_colors)
@@ -292,8 +452,10 @@ def generate_plotly_chart(df: pd.DataFrame, chart_config: Dict[str, Any]) -> Dic
         # Apply dark theme
         fig.update_layout(**DARK_THEME['layout'])
 
-        # Convert to JSON
-        return json.loads(fig.to_json())
+        # Convert to JSON and decode any binary-encoded arrays
+        # (Plotly 6.x encodes numpy arrays as binary which frontends can't decode)
+        chart_json = json.loads(fig.to_json())
+        return decode_plotly_binary(chart_json)
 
     except Exception as e:
         logger.error(f"Error generating {chart_type} chart: {e}")

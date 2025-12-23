@@ -2442,6 +2442,287 @@ async def reset_member_password(org_id: str, user_id: str, authorization: Option
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# SUPERUSER / ADMIN ENDPOINTS
+# ============================================================================
+
+async def require_superuser(authorization: Optional[str] = None):
+    """
+    Helper to verify user is a superuser.
+    Returns user dict if superuser, raises HTTPException otherwise.
+    """
+    from src.api.auth import extract_token_from_header, verify_token
+    from src.database.analytics_db import get_user_by_email, is_user_superuser
+
+    token = extract_token_from_header(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Authorization token required")
+
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user = get_user_by_email(payload.get('email'))
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    if not is_user_superuser(str(user['id'])):
+        raise HTTPException(status_code=403, detail="Superuser access required")
+
+    return user
+
+
+@app.get("/api/admin/stats")
+async def get_admin_stats(authorization: Optional[str] = Header(None)):
+    """
+    Get platform-wide statistics for admin dashboard.
+    Superuser only.
+
+    Returns:
+        - totalUsers: Number of users
+        - superuserCount: Number of superusers
+        - totalOrganizations: Number of organizations
+        - totalDataSources: Number of data sources
+        - totalPipelineRuns: Number of pipeline runs
+        - recentUsers: Users created in last 7 days
+        - recentOrganizations: Orgs created in last 7 days
+    """
+    try:
+        from src.database.analytics_db import get_admin_stats as db_get_admin_stats
+
+        await require_superuser(authorization)
+
+        stats = db_get_admin_stats()
+        return stats
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get admin stats failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/users")
+async def get_all_users(authorization: Optional[str] = Header(None)):
+    """
+    Get all users with their organization memberships.
+    Superuser only.
+
+    Returns:
+        - users: List of all users with org info
+        - count: Total count
+    """
+    try:
+        from src.database.analytics_db import get_all_users as db_get_all_users
+
+        await require_superuser(authorization)
+
+        users = db_get_all_users()
+
+        return {
+            "users": users,
+            "count": len(users)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get all users failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/organizations")
+async def get_all_organizations(authorization: Optional[str] = Header(None)):
+    """
+    Get all organizations with member counts.
+    Superuser only.
+
+    Returns:
+        - organizations: List of all organizations
+        - count: Total count
+    """
+    try:
+        from src.database.analytics_db import get_all_organizations as db_get_all_organizations
+
+        await require_superuser(authorization)
+
+        organizations = db_get_all_organizations()
+
+        return {
+            "organizations": organizations,
+            "count": len(organizations)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get all organizations failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/organizations")
+async def admin_create_organization(data: Dict[str, Any], authorization: Optional[str] = Header(None)):
+    """
+    Create a new organization (admin only).
+    Superuser only.
+
+    Body:
+        - name: Organization name
+        - slug: URL-friendly identifier
+        - industry: Industry type (optional)
+
+    Returns:
+        - organization: Created organization
+    """
+    try:
+        from src.database.analytics_db import create_organization as db_create_org
+
+        await require_superuser(authorization)
+
+        name = data.get('name', '').strip()
+        slug = data.get('slug', '').strip()
+        industry = data.get('industry', '').strip() or None
+
+        if not name or not slug:
+            raise HTTPException(status_code=400, detail="Name and slug are required")
+
+        org = db_create_org(name, slug, industry)
+
+        return {
+            "message": "Organization created successfully",
+            "organization": org
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Admin create organization failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/admin/organizations/{org_id}")
+async def admin_delete_organization(org_id: str, authorization: Optional[str] = Header(None)):
+    """
+    Delete an organization and all associated data.
+    Superuser only.
+
+    Path params:
+        - org_id: Organization UUID
+
+    Returns:
+        - result: Deletion details
+    """
+    try:
+        from src.database.analytics_db import admin_delete_organization as db_delete_org
+
+        await require_superuser(authorization)
+
+        result = db_delete_org(org_id)
+
+        if not result['success']:
+            raise HTTPException(status_code=404, detail="Organization not found")
+
+        return {
+            "message": "Organization deleted successfully",
+            "result": result
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Admin delete organization failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def admin_delete_user(user_id: str, authorization: Optional[str] = Header(None)):
+    """
+    Delete a user and all associated data.
+    Superuser only. Cannot delete self.
+
+    Path params:
+        - user_id: User UUID
+
+    Returns:
+        - result: Deletion details
+    """
+    try:
+        from src.database.analytics_db import admin_delete_user as db_delete_user
+
+        current_user = await require_superuser(authorization)
+
+        # Cannot delete self
+        if str(current_user['id']) == user_id:
+            raise HTTPException(status_code=400, detail="You cannot delete your own account")
+
+        result = db_delete_user(user_id)
+
+        if not result['success']:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        return {
+            "message": "User deleted successfully",
+            "result": result
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Admin delete user failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/admin/users/{user_id}/superuser")
+async def toggle_superuser_status(
+    user_id: str,
+    data: Dict[str, Any],
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Grant or revoke superuser status for a user.
+    Superuser only. Cannot modify self.
+
+    Path params:
+        - user_id: User UUID
+
+    Body:
+        - is_superuser: Boolean (true to grant, false to revoke)
+
+    Returns:
+        - message: Success message
+    """
+    try:
+        from src.database.analytics_db import set_superuser_status
+
+        current_user = await require_superuser(authorization)
+
+        # Cannot modify self
+        if str(current_user['id']) == user_id:
+            raise HTTPException(status_code=400, detail="You cannot modify your own superuser status")
+
+        is_superuser = data.get('is_superuser')
+        if is_superuser is None:
+            raise HTTPException(status_code=400, detail="is_superuser field is required")
+
+        success = set_superuser_status(user_id, is_superuser)
+
+        if not success:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        action = "granted" if is_superuser else "revoked"
+        return {
+            "message": f"Superuser status {action} successfully",
+            "user_id": user_id,
+            "is_superuser": is_superuser
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Toggle superuser status failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -30,11 +30,13 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash VARCHAR(255),           -- For local auth (null if OAuth only)
     auth_provider VARCHAR(50) DEFAULT 'local',  -- 'local', 'google', 'github'
     auth_provider_id VARCHAR(255),        -- External auth provider user ID
+    is_superuser BOOLEAN DEFAULT false,   -- Platform admin with access to all orgs/users
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_superuser ON users(is_superuser) WHERE is_superuser = true;
 
 -- Organization Memberships (Junction Table)
 -- Links users to organizations with roles

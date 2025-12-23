@@ -191,6 +191,25 @@ class FileStorage(IntermediateStorage):
 
         return schema
 
+    def cleanup(self, pipeline_id: str) -> None:
+        """
+        Clean up all data for a pipeline by removing its directory
+
+        Args:
+            pipeline_id: Pipeline ID to clean up
+        """
+        import shutil
+
+        pipeline_dir = self.base_path / pipeline_id
+        if pipeline_dir.exists() and pipeline_dir.is_dir():
+            try:
+                shutil.rmtree(pipeline_dir)
+                self.logger.info(f"Cleaned up pipeline directory: {pipeline_dir}")
+            except Exception as e:
+                self.logger.warning(f"Failed to cleanup {pipeline_dir}: {e}")
+        else:
+            self.logger.info(f"No data to cleanup for pipeline: {pipeline_id}")
+
     def _records_to_arrow_table(self, records: List[Record]) -> pa.Table:
         """Convert Record objects to Arrow Table"""
         if not records:
